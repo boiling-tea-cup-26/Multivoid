@@ -1,0 +1,44 @@
+# Prop pickup regression recode decision
+
+Date: 2026-11-21  
+Status: **clean upstream branch prepared; no recode code changes or test build yet.**
+
+## Decision
+
+Stop patching the b329 line. Reconstruct the regression by starting from a known-working public release and reintroducing the modifications in logical groups, testing client pickup after each group. There will be no b330 based on b329.
+
+The new isolated checkout is this directory, on branch `recode/b301-prop-pickup-bisect`, created from the public tag `v0.9.0n-b292-dev` at commit `ca8537cb902bc4ed4fc5f276cb4a4b693b69909b`. The parent project remains untouched by recode implementation work.
+
+## Evidence at the start
+
+- **User runtime observation:** the public upstream build works for client pickup.
+- **User runtime observation:** modified builds b301 through b329 fail; swapping host/client roles makes the failure follow the client.
+- **User runtime observation:** b329 did not fix the issue. It is a failed candidate, not a baseline for further implementation.
+- **Artifact limit:** the preserved b301 package is at `../multivoid/Multivoid-main/Multivoid-main/local/checkpoint-package/Pelmentor-Multivoid-0.9.301.zip`. The existing b301 audit reports that the package contains a stripped DLL and no source/symbols. Build logs and historical reports are retained in the parent project. We have not yet established an available b301 source snapshot or a byte-accurate b292-to-b301 source diff.
+- **Source fact:** the current b329 line has changes after b301 as well as attempted repairs. Its source cannot stand in for b301 when assigning the original regression to a group.
+
+The parent project’s [handoff](../multivoid/Multivoid-main/Multivoid-main/handoff.md), [b301/b328 comparison](../multivoid/Multivoid-main/Multivoid-main/local/analysis/round25/b301-b328-client-prop-input-comparison.md), and [b329 comparison/build report](../multivoid/Multivoid-main/Multivoid-main/local/analysis/round26/b329-native-pickup-upstream-comparison.md) are preserved as historical records, not as current instructions or a proven b301 source diff.
+
+## Documentation policy
+
+The upstream documentation in this checkout is retained as the starting documentation. The parent project’s docs, audits, build reports, logs, and failed test results are also retained in place so they continue to teach what was tried and what evidence exists. Recode-specific instructions and results go in this folder. Do not copy stale build status into upstream `README.md`, `START_HERE.md`, or feature pages. Any historical claim reused here must name its build and whether it came from user runtime, source, artifact inspection, or a test fixture.
+
+## Planned incremental groups
+
+These are investigation buckets, not claims that the b301 diff has already been reconstructed. Exact files and commits for each bucket must come from the source comparison before implementation.
+
+1. **Prop physics:** simulation enable/disable, parking/unparking, collision state, sleep/freeze/static reconciliation, and physics handoff.
+2. **Mirror creation:** host prop identity, client mirror adoption/spawn, key/EID binding, and spawn-time convergence.
+3. **Input interception:** E press/release, `IsSimulatingPhysics` query routing, pickup dispatch, contextual action selection, and other hooks on the native input path.
+4. **Synchronization:** held pose/release, host admission/arbitration, PropDrive ownership transfer, and throw/drop continuation.
+
+For each group, keep earlier groups fixed at their last user-tested state, introduce only that group, build both peers from the same source, and wait for the user’s runtime result before proceeding. If the result changes, revert only that group and repeat the same test to confirm the boundary.
+
+## Test sequence
+
+- **Baseline:** use the existing user-verified public b292 behavior as the reference. If a fresh run is practical, confirm one ordinary client tap pickup and one intentional context action before code changes.
+- **After each group:** use identical candidate builds on host and client. The client performs repeated E taps on ordinary movable props; separately exercise an intentional hold-E context action. The host observes the same object and action. Keep host-initiated pickup as a control. Test R-held luggage separately from E pickup.
+- **Acceptance:** record the exact candidate commit/group, prop/action, initiating role, observer role, and both results. No logs are required unless the user later asks for a diagnostic step.
+- **First failing group:** stop, revert that group, confirm pickup returns, then subdivide the group. Do not continue stacking changes on a failing candidate.
+
+No candidate build is currently designated or delivered from this branch. Any eventual candidate must state explicitly that it is based on b292 plus the named group(s), never imply it was built on b329, and wait for user runtime verification before the next group.
