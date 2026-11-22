@@ -9,6 +9,7 @@
 // born mode, below).
 
 #include "coop/world/event_cue_sync.h"
+#include "coop/world/anti_gravity_light_sync.h"
 
 #include "coop/net/protocol.h"
 #include "coop/net/session.h"
@@ -244,6 +245,7 @@ void OnRunEventPost(const sg::Call& call) {
 
 void Install(coop::net::Session* session) {
     g_session.store(session, std::memory_order_release);
+    coop::anti_gravity_light_sync::Install(session);
     // Called every pump tick by the install fanout, which is also the retry until the gate has
     // resolved the watch's name.
     if (!g_watchInstalled)
@@ -264,6 +266,7 @@ void Install(coop::net::Session* session) {
 
 void OnReliable(const coop::net::EventCuePayload& payload) {
     if (!GT::IsGameThread()) { UE_LOGW("event_cue: OnReliable off-game-thread -- dropping"); return; }
+    if (coop::anti_gravity_light_sync::OnCue(payload)) return;
     if (coop::vent_crawler_sync::OnCue(payload)) return;  // a crawl's start
     if (coop::world_sound_sync::OnCue(payload)) return;  // a sound cue, not an emitter
     if (payload.cueId >= static_cast<uint32_t>(kCueCount)) {
@@ -316,6 +319,7 @@ void QueueConnectBroadcastForSlot(int peerSlot) {
     if (!GT::IsGameThread()) return;
     auto* s = g_session.load(std::memory_order_acquire);
     if (!s || s->role() != coop::net::Role::Host) return;
+    coop::anti_gravity_light_sync::OnPeerWorldReady(peerSlot);
     struct Ctx { coop::net::Session* s; int slot; void* tmpls[kCueCount]; };
     Ctx ctx{ s, peerSlot, {} };
     bool anyLoaded = false;
@@ -347,6 +351,7 @@ void QueueConnectBroadcastForSlot(int peerSlot) {
 }
 
 void OnDisconnect() {
+    coop::anti_gravity_light_sync::OnDisconnect();
     g_session.store(nullptr, std::memory_order_release);
     g_born.clear();
 }

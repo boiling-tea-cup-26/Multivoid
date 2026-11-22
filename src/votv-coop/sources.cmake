@@ -164,6 +164,7 @@ set(VOTVCOOP_SOURCES
     src/coop/world/explosion_recipe.cpp
     src/coop/world/explosion_recipe_selftest.cpp
     src/coop/world/explosion_parking.cpp
+    src/coop/world/anti_gravity_light_sync.cpp
     src/coop/world/event_cue_sync.cpp
     src/coop/world/event_fire_policy.cpp
     src/coop/world/event_fire_sync.cpp

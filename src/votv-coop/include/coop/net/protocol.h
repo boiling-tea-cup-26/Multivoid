@@ -31,7 +31,7 @@ inline constexpr uint32_t kMagic = 0x564D5450u;
 // This file is past the 1500-line hard cap and stays there: it is the single-feature exception the
 // rule names. One wire format, whose enum, payload structs and static_asserts are read together;
 // splitting it would put a kind's number in one file and its bytes in another.
-inline constexpr uint16_t kProtocolVersion = 292;
+inline constexpr uint16_t kProtocolVersion = 293;
 
 // Default LAN port (overridable via multivoid.ini "net.port=").
 inline constexpr uint16_t kDefaultPort = 47621;
@@ -3852,15 +3852,18 @@ struct FireflySpawnPayload {
 };
 static_assert(sizeof(FireflySpawnPayload) == 12, "FireflySpawnPayload must be 12 bytes");
 
-// One cosmetic emitter cue (EventCue): the registry index and the world position. cueId is on the
-// wire and the registry is append-only.
+// One cosmetic event cue (EventCue): the registry index and world position. The optional
+// hostWorldEpoch/occurrenceSeq pair identifies occurrence-scoped start/stop cues; both are zero
+// for ordinary one-shot emitter cues. cueId is append-only.
 struct EventCuePayload {
     uint32_t cueId;  // index into event_cue_sync's cue registry (append-only)
     float x;         // world spawn location of the cue emitter
     float y;
     float z;
+    uint32_t hostWorldEpoch;  // optional occurrence identity; zero for ordinary emitter cues
+    uint32_t occurrenceSeq;   // paired start/stop occurrence, nonzero when hostWorldEpoch is nonzero
 };
-static_assert(sizeof(EventCuePayload) == 16, "EventCuePayload must be 16 bytes");
+static_assert(sizeof(EventCuePayload) == 24, "EventCuePayload must be 24 bytes");
 
 // One pickup blip (InventoryPickup): the collector's world position at collect time, so the cue
 // plays there regardless of puppet state.
