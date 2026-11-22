@@ -130,6 +130,25 @@ bool HandleWorldEvent(const net::Session::ReliableMessage& msg) {
         coop::event_fire_sync::OnReliable(fp);
         break;
     }
+    case net::ReliableKind::EventFireRequest: {
+        // A client-authored manual request is accepted only by the host. Authorship is enforced
+        // at the transport edge; this dispatch supplies the seated peer slot so the event module
+        // can require a ready participant and rate-limit that sender.
+        if (msg.payloadLen < sizeof(net::EventFirePayload)) {
+            UE_LOGW("event_feed: EventFireRequest payload too short (%zu < %zu)",
+                    static_cast<size_t>(msg.payloadLen), sizeof(net::EventFirePayload));
+            break;
+        }
+        if (msg.senderPeerSlot < 1 || msg.senderPeerSlot >= net::kMaxPeers) {
+            UE_LOGW("event_feed: EventFireRequest invalid senderPeerSlot=%d -- dropping",
+                    msg.senderPeerSlot);
+            break;
+        }
+        net::EventFirePayload fp{};
+        std::memcpy(&fp, msg.payload, sizeof(fp));
+        coop::event_fire_sync::OnRequest(fp, static_cast<uint8_t>(msg.senderPeerSlot));
+        break;
+    }
     case net::ReliableKind::EventSnapshot: {
         // The host-to-joiner in-flight event registry entry at the world-ready edge. The same trust
         // shape as the event fire: world-mutating, host-only origin, never relayed.

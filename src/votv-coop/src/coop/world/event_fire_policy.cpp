@@ -11,7 +11,9 @@ namespace coop::event_fire_sync {
 // carries it. The default is no replay. Replay only rows whose effect is a deterministic
 // level, save or cosmetic flip that no existing lane delivers; replaying a lane-covered row
 // would double-deliver. Keyed by name only: the few names living in both dispatchers have
-// the same verdict either way, and the replay call still uses the received dispatch kind.
+// the same verdict either way, and the replay call still uses the received dispatch kind. A
+// manual-fire flag bypasses completed-schedule dedupe only after this row policy admits replay;
+// it never overrides a no-replay verdict.
 const char* const kReplayRows[] = {
     // Story and save flips (level-placed triggers; no lane):
     "treehouse_0", "treehouse_1", "treehouse_2", "treehouse_3", "treehouse_4", "treehouse_5",

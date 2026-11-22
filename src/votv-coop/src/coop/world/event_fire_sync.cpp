@@ -15,6 +15,7 @@
 
 #include "event_fire_policy.h"  // ReplayVerdict (co-located private header)
 
+#include "coop/dev/event_trigger.h"
 #include "coop/net/protocol.h"
 #include "coop/net/session.h"
 #include "coop/net/session_serial.h"
@@ -33,6 +34,7 @@
 #include "ue_wrap/world/daynightcycle.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -61,6 +63,7 @@ void* g_runSpecialEventFn = nullptr;  // runSpecialEvent(FName eventName1) -> bo
 void* g_summonArirPrankFn = nullptr;  // summonArirPrank(), runSpecialEvent's prank-roll caller
 void* g_settimeFn = nullptr;          // saveSlot.settime, the scheduler's walk
 int32_t g_offEventParam = -1;         // runEvent's `event` in its parameter frame
+int32_t g_offRunSpecialParam = -1;    // runEvent's `special` in its parameter frame
 int32_t g_offSpecialParam = -1;       // runSpecialEvent's `eventName1` in its parameter frame
 bool g_resolved = false;
 bool g_resolveFailed = false;
@@ -71,6 +74,8 @@ bool g_resolveFailed = false;
 // a sequence counter only, a RunEvent dedupes on the client by name within the session, and a
 // special is re-fired every broadcast by design.
 constexpr int kTagEventFire = 0x45564652;  // 'EVFR'
+constexpr uint8_t kManualFireFlag = 0x80;
+constexpr uint8_t kDispatchMask = 0x7f;
 UE_FACT_FN(kRowRunEvent, "event_fire_sync", nullptr, L"runEvent", AnyClass);
 UE_FACT_FN(kRowRunSpecialEvent, "event_fire_sync", nullptr, L"runSpecialEvent", AnyClass);
 UE_FACT_FN(kRowCycleTick, "event_fire_sync", L"daynightCycle_C", L"ReceiveTick", Declared);
@@ -89,6 +94,8 @@ int32_t g_zeroedSaveSlotIdx = -1;
 struct PendingFire {
     FireKind kind;
     std::string name;
+    std::string specialName;
+    bool manual = false;           // a direct fire, distinct from scheduled one-shot history
     // The active override: the host registry says this row is in flight, so bypass the
     // passEvents dedupe (a mid-event joiner's blob carries the row as completed history while
     // the event is still running).
@@ -105,6 +112,21 @@ constexpr size_t kMaxPending = 128;
 // install pump drives the drain, so a waiting row never waits for the next fire.
 constexpr auto kReplayRetrySpacing = std::chrono::seconds(1);
 std::unordered_set<std::string> g_replayed;  // rows replayed this session (dedupe)
+std::array<std::chrono::steady_clock::time_point, coop::net::kMaxPeers> g_lastManualRequest{};
+constexpr auto kManualRequestSpacing = std::chrono::milliseconds(250);
+struct FireDebt {
+    coop::net::EventFirePayload payload{};
+    uint8_t peerSlot = 0;
+    uint32_t peerGeneration = 0;
+    uint32_t sessionSerial = 0;
+    uint32_t worldGeneration = 0;
+    uint8_t attempts = 0;
+    std::chrono::steady_clock::time_point nextTry{};
+};
+std::deque<FireDebt> g_fireDebt;  // only per-peer sends explicitly refused by the reliable backlog
+constexpr size_t kMaxFireDebt = 128;
+constexpr uint8_t kMaxFireAttempts = 12;
+constexpr auto kFireRetrySpacing = std::chrono::milliseconds(100);
 std::atomic<unsigned> g_replays{0};          // fires replayed natively (ReplayCount)
 // The queue and the replayed set belong to one world: unbound while a join window's fires wait
 // for the first Gameplay eventer to exist (a fire for the world being loaded must not die with
@@ -122,6 +144,7 @@ struct RawArray {
 bool MembersMissing() {
     return g_offSaveSlot < 0 || g_offEventer < 0 || g_offPassEvents < 0 || g_offAllEvents < 0 ||
            !g_runEventFn || !g_runSpecialEventFn || !g_settimeFn || g_offEventParam < 0 ||
+           g_offRunSpecialParam < 0 ||
            g_offSpecialParam < 0;
 }
 
@@ -144,15 +167,16 @@ bool ResolvePass() {
     g_summonArirPrankFn = R::FindFunction(evCls, L"summonArirPrank");
     g_settimeFn = R::FindFunction(ssCls, L"settime");
     g_offEventParam = g_runEventFn ? R::FindParamOffset(g_runEventFn, L"event") : -1;
+    g_offRunSpecialParam = g_runEventFn ? R::FindParamOffset(g_runEventFn, L"special") : -1;
     g_offSpecialParam = g_runSpecialEventFn ? R::FindParamOffset(g_runSpecialEventFn, L"eventName1") : -1;
     if (MembersMissing()) {
         g_resolveFailed = true;
         UE_LOGW("event_fire: resolution INCOMPLETE on loaded classes (saveSlot=0x%X eventer=0x%X "
-                "passEvents=0x%X allEvents=0x%X runEvent=%s(event=0x%X) "
+                "passEvents=0x%X allEvents=0x%X runEvent=%s(event=0x%X special=0x%X) "
                 "runSpecialEvent=%s(eventName1=0x%X) settime=%s) -- "
                 "latched OFF; game version mismatch?",
                 g_offSaveSlot, g_offEventer, g_offPassEvents, g_offAllEvents, g_runEventFn ? "yes" : "NO",
-                g_offEventParam, g_runSpecialEventFn ? "yes" : "NO", g_offSpecialParam,
+                g_offEventParam, g_offRunSpecialParam, g_runSpecialEventFn ? "yes" : "NO", g_offSpecialParam,
                 g_settimeFn ? "yes" : "NO");
         return false;
     }
@@ -214,22 +238,36 @@ struct Admission {
 };
 Admission* g_admission = nullptr;   // game thread; set for exactly the length of NativeFire's Call
 uint64_t g_clientRefused = 0;
+bool g_refusalProbe = false;  // the dev seam must test cancellation without asking the host to fire solar
 
 sg::Verdict OnEventerVerbPre(const sg::Call& call) {
     if (!IsClientSession()) return sg::Verdict::Run;
     Admission* a = g_admission;
-    if (a && !a->spent && call.object == a->object && call.function == a->function) {
-        a->spent = true;
-        return sg::Verdict::Run;
+    if (a) {
+        if (!a->spent && call.object == a->object && call.function == a->function) {
+            a->spent = true;
+            return sg::Verdict::Run;
+        }
+        // A replay's nested eventer call is part of that host-authored body. It is refused,
+        // never turned into a second client-authored request.
+        return sg::Verdict::Cancel;
     }
     const uint64_t n = ++g_clientRefused;
+    if (g_refusalProbe) return sg::Verdict::Cancel;
+    const bool special = call.function == g_runSpecialEventFn;
+    const int32_t eventOff = special ? g_offSpecialParam : g_offEventParam;
+    const std::string eventName = (call.locals && eventOff >= 0)
+        ? NarrowName(*reinterpret_cast<const R::FName*>(call.locals + eventOff)) : std::string();
+    const std::string specialName = (!special && call.locals && g_offRunSpecialParam >= 0)
+        ? NarrowName(*reinterpret_cast<const R::FName*>(call.locals + g_offRunSpecialParam)) : std::string();
+    const bool sent = !eventName.empty() && ClientRequest(
+        special ? RequestKind::SpecialEvent : RequestKind::RunEvent,
+        std::wstring(eventName.begin(), eventName.end()),
+        std::wstring(specialName.begin(), specialName.end()));
     if ((n & (n - 1)) == 0) {
-        const bool special = call.function == g_runSpecialEventFn;
-        const int32_t off = special ? g_offSpecialParam : g_offEventParam;
-        const std::string ev = (call.locals && off >= 0)
-            ? NarrowName(*reinterpret_cast<const R::FName*>(call.locals + off)) : std::string("?");
-        UE_LOGI("event_fire: refused a client's own %s('%s') (#%llu) -- the host fires every event",
-                special ? "runSpecialEvent" : "runEvent", ev.c_str(), static_cast<unsigned long long>(n));
+        UE_LOGI("event_fire: client %s('%s') %s host request (#%llu)",
+                special ? "runSpecialEvent" : "runEvent", eventName.empty() ? "?" : eventName.c_str(),
+                sent ? "forwarded as" : "refused; could not queue", static_cast<unsigned long long>(n));
     }
     return sg::Verdict::Cancel;
 }
@@ -296,16 +334,97 @@ void SayUnlatched(const char* verb, void* fn) {
             "broadcast; the eventer class was reloaded?", verb, fn);
 }
 
-void Broadcast(FireKind kind, const std::string& name) {
+void SetWireText(char* out, size_t cap, const std::string& value) {
+    if (!out || cap == 0) return;
+    const size_t n = value.size() < cap - 1 ? value.size() : cap - 1;
+    std::memcpy(out, value.data(), n);
+    out[n] = '\0';
+}
+
+bool ReadWireText(const char* data, size_t cap, std::string& out) {
+    if (!data || cap == 0) return false;
+    const void* end = std::memchr(data, '\0', cap);
+    if (!end) return false;
+    out.assign(data, static_cast<const char*>(end) - data);
+    return true;
+}
+
+void Broadcast(FireKind kind, const std::string& name, const std::string& specialName,
+               bool manual) {
     auto* s = g_session.load(std::memory_order_acquire);
     if (!s || !s->connected() || s->role() != coop::net::Role::Host) return;
-    coop::net::EventFirePayload p{};  // zero-init -> name[] pre-NUL-bound
-    p.dispatch = static_cast<uint8_t>(kind);
-    const size_t n = name.size() < sizeof(p.name) - 1 ? name.size() : sizeof(p.name) - 1;
-    std::memcpy(p.name, name.c_str(), n);
-    s->SendReliable(coop::net::ReliableKind::EventFire, &p, sizeof(p));
-    UE_LOGI("event_fire: broadcast %s '%s'",
-            kind == FireKind::SpecialEvent ? "runSpecialEvent" : "runEvent", name.c_str());
+    coop::net::EventFirePayload p{};
+    if (name.empty() || name.size() >= sizeof(p.name) || specialName.size() >= sizeof(p.specialName)) {
+        UE_LOGW("event_fire: host fire '%s' is not wire-safe -- not broadcasting", name.c_str());
+        return;
+    }
+    p.dispatch = static_cast<uint8_t>(kind) | (manual ? kManualFireFlag : 0);
+    SetWireText(p.name, sizeof(p.name), name);
+    SetWireText(p.specialName, sizeof(p.specialName), specialName);
+    size_t targets = 0;
+    size_t refused = 0;
+    for (int slot = 1; slot < coop::net::kMaxPeers; ++slot) {
+        if (!s->IsSlotConnected(slot)) continue;
+        ++targets;
+        const uint32_t generation = s->peerGenerationForSlot(slot);
+        if (s->SendReliableToSlot(slot, coop::net::ReliableKind::EventFire,
+                                  &p, sizeof(p), /*senderSlot=*/0)) continue;
+        ++refused;
+        if (g_fireDebt.size() >= kMaxFireDebt || generation == 0) {
+            UE_LOGW("event_fire: '%s' admission refused for slot=%d and retry could not be queued",
+                    name.c_str(), slot);
+            continue;
+        }
+        FireDebt debt{};
+        debt.payload = p;
+        debt.peerSlot = static_cast<uint8_t>(slot);
+        debt.peerGeneration = generation;
+        debt.sessionSerial = coop::net::session_serial::Current();
+        debt.worldGeneration = ue_wrap::world_identity::Generation();
+        debt.nextTry = std::chrono::steady_clock::now() + kFireRetrySpacing;
+        g_fireDebt.push_back(debt);
+        UE_LOGW("event_fire: '%s' admission refused for slot=%d -- queued bounded retry",
+                name.c_str(), slot);
+    }
+    if (targets == 0) return;
+    if (refused != 0) return;
+    UE_LOGI("event_fire: broadcast %s '%s'%s to %zu peer(s)",
+            kind == FireKind::SpecialEvent ? "runSpecialEvent" : "runEvent", name.c_str(),
+            manual ? " (manual)" : "", targets);
+}
+
+void DrainFireDebt() {
+    auto* session = g_session.load(std::memory_order_acquire);
+    if (!session || !session->connected() || session->role() != coop::net::Role::Host) return;
+    const auto now = std::chrono::steady_clock::now();
+    const uint32_t serial = coop::net::session_serial::Current();
+    for (auto it = g_fireDebt.begin(); it != g_fireDebt.end();) {
+        FireDebt& debt = *it;
+        if (debt.sessionSerial != serial ||
+            debt.worldGeneration != ue_wrap::world_identity::Generation() ||
+            !session->IsSlotConnected(debt.peerSlot) ||
+            session->peerGenerationForSlot(debt.peerSlot) != debt.peerGeneration) {
+            it = g_fireDebt.erase(it);
+            continue;
+        }
+        if (now < debt.nextTry) { ++it; continue; }
+        if (session->SendReliableToSlot(debt.peerSlot, coop::net::ReliableKind::EventFire,
+                                        &debt.payload, sizeof(debt.payload), /*senderSlot=*/0)) {
+            UE_LOGI("event_fire: admission retry delivered '%s' to slot=%u after %u retry(s)",
+                    debt.payload.name, debt.peerSlot, debt.attempts + 1);
+            it = g_fireDebt.erase(it);
+            continue;
+        }
+        ++debt.attempts;
+        if (debt.attempts >= kMaxFireAttempts) {
+            UE_LOGW("event_fire: admission retry exhausted for '%s' at slot=%u -- event output may be missing",
+                    debt.payload.name, debt.peerSlot);
+            it = g_fireDebt.erase(it);
+            continue;
+        }
+        debt.nextTry = now + kFireRetrySpacing;
+        ++it;
+    }
 }
 
 // The one emit point for host fires, at the body commit: runEvent entered from settime is a
@@ -319,12 +438,16 @@ void OnRunEventPost(const sg::Call& call) {
     if (!ResolvePass()) return;
     if (call.function != g_runEventFn) { SayUnlatched("runEvent", call.function); return; }
     const std::string name = NarrowName(*reinterpret_cast<const R::FName*>(call.locals + g_offEventParam));
+    const std::string specialName =
+        NarrowName(*reinterpret_cast<const R::FName*>(call.locals + g_offRunSpecialParam));
     const char* origin = call.callerFunction == g_settimeFn ? "scheduler" :
                          call.fromOurCode ? "dev-call" : "native";
     ++g_hostFireSeq;
     UE_LOGI("event_fire: host fire #%u runEvent('%s') origin=%s -- broadcasting",
             g_hostFireSeq, name.c_str(), origin);
-    Broadcast(FireKind::RunEvent, name);
+    // settime is the only scheduler caller. Every other caller is a deliberate/native manual
+    // trigger, which must replay even when the client's save already lists this one-shot row.
+    Broadcast(FireKind::RunEvent, name, specialName, call.callerFunction != g_settimeFn);
 }
 
 // HOST: a runSpecialEvent body just completed. The natural entry is a scheduled ariralPrank
@@ -345,7 +468,7 @@ void OnRunSpecialEventPost(const sg::Call& call) {
     ++g_hostFireSeq;
     UE_LOGI("event_fire: host fire #%u runSpecialEvent('%s') origin=%s -- broadcasting",
             g_hostFireSeq, name.c_str(), origin);
-    Broadcast(FireKind::SpecialEvent, name);
+    Broadcast(FireKind::SpecialEvent, name, {}, true);
 }
 
 // True iff the client's own passEvents already contains the row (the transferred save
@@ -386,7 +509,7 @@ ReplayStep TryReplay(const PendingFire& pf) {
     if (g_boundGen == 0) g_boundGen = ue_wrap::world_identity::Generation();
     // Dedupe applies to one-shot scheduled rows only (the game's own passEvents semantics);
     // specials (graffiti, pranks the menu re-fires) are repeatable by design.
-    if (pf.kind == FireKind::RunEvent) {
+    if (pf.kind == FireKind::RunEvent && !pf.manual) {
         if (g_replayed.count(pf.name)) {
             UE_LOGI("event_fire: '%s' already replayed this session -- skipping", pf.name.c_str());
             return ReplayStep::Done;
@@ -402,15 +525,15 @@ ReplayStep TryReplay(const PendingFire& pf) {
         }
     }
     const std::wstring w(pf.name.begin(), pf.name.end());
-    UE_LOGI("event_fire: client REPLAY %s '%s'%s",
+    const std::wstring special(pf.specialName.begin(), pf.specialName.end());
+    UE_LOGI("event_fire: client REPLAY %s '%s'%s%s",
             pf.kind == FireKind::SpecialEvent ? "runSpecialEvent" : "runEvent", pf.name.c_str(),
-            pf.activeOverride ? " (in-flight active-override)" : "");
-    // The special is always None: the only native special is the prank roll, whose chosen case
-    // the host's runSpecialEvent watch sends on its own. Marked consumed only on a successful
-    // dispatch (a frame or call failure is loud and must not eat the row).
-    if (NativeFire(pf.kind, w, L"None")) {
+            pf.manual ? " (manual)" : "", pf.activeOverride ? " (in-flight active-override)" : "");
+    // Preserve runEvent's actual second FName. Marked consumed only on a successful dispatch (a
+    // frame or call failure is loud and must not eat the row).
+    if (NativeFire(pf.kind, w, special.empty() ? L"None" : special)) {
         g_replays.fetch_add(1, std::memory_order_relaxed);
-        if (pf.kind == FireKind::RunEvent) g_replayed.insert(pf.name);
+        if (pf.kind == FireKind::RunEvent && !pf.manual) g_replayed.insert(pf.name);
     }
     return ReplayStep::Done;
 }
@@ -499,10 +622,43 @@ void OnCycleTickPre(void* self, void* /*function*/, void* /*params*/) {
             "firer; restored on disconnect)", g_zeroedAllEventsNum);
 }
 
+const coop::dev::event_trigger::EventInfo* FindRequestedEvent(
+    uint8_t dispatch, const std::string& name, const std::string& specialName) {
+    using D = coop::dev::event_trigger::Dispatch;
+    for (const auto& event : coop::dev::event_trigger::Events()) {
+        if (dispatch == static_cast<uint8_t>(RequestKind::Ambient)) {
+            if (event.dispatch == D::Ambient && name == event.name && specialName.empty()) return &event;
+            continue;
+        }
+        if (dispatch == static_cast<uint8_t>(RequestKind::SpecialEvent)) {
+            if (event.dispatch == D::SpecialEvent && name == event.name &&
+                (specialName.empty() || specialName == "None")) return &event;
+            continue;
+        }
+        if (dispatch != static_cast<uint8_t>(RequestKind::RunEvent)) continue;
+        if (event.dispatch == D::RunEvent && name == event.name &&
+            (specialName.empty() || specialName == "None")) return &event;
+        if (event.dispatch == D::RandomPrank && name == "arirInteraction_0" &&
+            specialName == "ariralPrank") return &event;
+    }
+    return nullptr;
+}
+
+bool ToAscii(const std::wstring& value, std::string& out) {
+    out.clear();
+    out.reserve(value.size());
+    for (wchar_t ch : value) {
+        if (ch > 0x7f) return false;
+        out.push_back(static_cast<char>(ch));
+    }
+    return true;
+}
+
 }  // namespace
 
 void Install(coop::net::Session* session) {
     g_session.store(session, std::memory_order_release);
+    DrainFireDebt();
     // Called every pump tick by the install fanout, which is also the retry until the cycle class
     // loads and until the gate has resolved the watch's name.
     // The PRE is the client's refusal (OnEventerVerbPre), the POST the host's emit.
@@ -610,19 +766,88 @@ bool HostFire(FireKind kind, const std::wstring& eventName, const std::wstring& 
     return true;
 }
 
+bool ClientRequest(RequestKind kind, const std::wstring& eventName, const std::wstring& specialName) {
+    auto* session = g_session.load(std::memory_order_acquire);
+    if (!session || !session->connected() || session->role() != coop::net::Role::Client) return false;
+    if (kind != RequestKind::RunEvent && kind != RequestKind::SpecialEvent &&
+        kind != RequestKind::Ambient) return false;
+    coop::net::EventFirePayload payload{};
+    std::string name, special;
+    if (!ToAscii(eventName, name) || !ToAscii(specialName, special) || name.empty() ||
+        name.size() >= sizeof(payload.name) || special.size() >= sizeof(payload.specialName)) {
+        UE_LOGW("event_fire: client request rejected locally -- event name is not wire-safe");
+        return false;
+    }
+    payload.dispatch = static_cast<uint8_t>(kind);
+    SetWireText(payload.name, sizeof(payload.name), name);
+    SetWireText(payload.specialName, sizeof(payload.specialName), special);
+    const bool sent = session->SendReliable(coop::net::ReliableKind::EventFireRequest,
+                                             &payload, sizeof(payload));
+    if (!sent)
+        UE_LOGW("event_fire: client request admission failed for dispatch=%u name='%s'",
+                payload.dispatch, name.c_str());
+    else
+        UE_LOGI("event_fire: client requested host dispatch=%u name='%s'", payload.dispatch, name.c_str());
+    return sent;
+}
+
+void OnRequest(const coop::net::EventFirePayload& payload, uint8_t senderPeerSlot) {
+    if (!GT::IsGameThread()) { UE_LOGW("event_fire: OnRequest off-game-thread -- dropping"); return; }
+    auto* session = g_session.load(std::memory_order_acquire);
+    if (!session || !session->connected() || session->role() != coop::net::Role::Host ||
+        senderPeerSlot == 0 || senderPeerSlot >= coop::net::kMaxPeers ||
+        !session->IsSlotConnected(senderPeerSlot) || !session->IsSlotWorldReady(senderPeerSlot)) {
+        UE_LOGW("event_fire: request from unready/invalid peer slot=%u -- dropping", senderPeerSlot);
+        return;
+    }
+    std::string name, specialName;
+    if (payload.dispatch > static_cast<uint8_t>(RequestKind::Ambient) ||
+        !ReadWireText(payload.name, sizeof(payload.name), name) ||
+        !ReadWireText(payload.specialName, sizeof(payload.specialName), specialName) || name.empty()) {
+        UE_LOGW("event_fire: malformed manual request from slot=%u -- dropping", senderPeerSlot);
+        return;
+    }
+    const auto* event = FindRequestedEvent(payload.dispatch, name, specialName);
+    if (!event) {
+        UE_LOGW("event_fire: refused unregistered manual request from slot=%u dispatch=%u name='%s'",
+                senderPeerSlot, payload.dispatch, name.c_str());
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (g_lastManualRequest[senderPeerSlot] != std::chrono::steady_clock::time_point{} &&
+        now - g_lastManualRequest[senderPeerSlot] < kManualRequestSpacing) {
+        UE_LOGW("event_fire: rate-limited manual request from slot=%u name='%s'",
+                senderPeerSlot, name.c_str());
+        return;
+    }
+    g_lastManualRequest[senderPeerSlot] = now;
+    if (event->dispatch == coop::dev::event_trigger::Dispatch::Ambient) {
+        if (!coop::dev::event_trigger::Trigger(*event))
+            UE_LOGW("event_fire: host could not queue ambient request '%s' from slot=%u", name.c_str(), senderPeerSlot);
+        else
+            UE_LOGI("event_fire: accepted ambient request '%s' from slot=%u", name.c_str(), senderPeerSlot);
+        return;
+    }
+    const FireKind fireKind = payload.dispatch == static_cast<uint8_t>(RequestKind::SpecialEvent)
+        ? FireKind::SpecialEvent : FireKind::RunEvent;
+    if (!HostFire(fireKind, std::wstring(name.begin(), name.end()),
+                  std::wstring(specialName.begin(), specialName.end())))
+        UE_LOGW("event_fire: host could not queue manual event '%s' from slot=%u", name.c_str(), senderPeerSlot);
+    else
+        UE_LOGI("event_fire: accepted manual event '%s' from slot=%u", name.c_str(), senderPeerSlot);
+}
+
 void OnReliable(const coop::net::EventFirePayload& payload) {
     if (!GT::IsGameThread()) { UE_LOGW("event_fire: OnReliable off-game-thread -- dropping"); return; }
-    // NUL-bound the name (the payload crosses the trust boundary; the dispatcher length-checked
-    // it).
-    char buf[sizeof(payload.name) + 1] = {};
-    std::memcpy(buf, payload.name, sizeof(payload.name));
-    const std::string name(buf);
-    if (name.empty() || payload.dispatch > static_cast<uint8_t>(FireKind::SpecialEvent)) {
+    std::string name, specialName;
+    if (!ReadWireText(payload.name, sizeof(payload.name), name) ||
+        !ReadWireText(payload.specialName, sizeof(payload.specialName), specialName) ||
+        name.empty() || (payload.dispatch & kDispatchMask) > static_cast<uint8_t>(FireKind::SpecialEvent)) {
         UE_LOGW("event_fire: OnReliable malformed (dispatch=%u, name='%s') -- dropping",
                 payload.dispatch, name.c_str());
         return;
     }
-    const FireKind kind = static_cast<FireKind>(payload.dispatch);
+    const FireKind kind = static_cast<FireKind>(payload.dispatch & kDispatchMask);
     const char* lane = nullptr;
     const int verdict = ReplayVerdict(name, &lane);
     if (verdict == 0) {
@@ -635,7 +860,11 @@ void OnReliable(const coop::net::EventFirePayload& payload) {
         return;
     }
     DrainPending();
-    PendingFire pf{ kind, name };
+    PendingFire pf{};
+    pf.kind = kind;
+    pf.name = name;
+    pf.specialName = specialName;
+    pf.manual = (payload.dispatch & kManualFireFlag) != 0;
     if (g_pending.empty()) {  // a non-empty queue tries it in FIFO order later
         const ReplayStep step = TryReplay(pf);
         if (step == ReplayStep::Done) return;
@@ -645,9 +874,9 @@ void OnReliable(const coop::net::EventFirePayload& payload) {
     // One-shot rows dedupe at queue time too (a scheduler re-fire of a dev-fired row during the
     // same load window would otherwise queue twice; the replay would catch it later, but a
     // duplicate-free queue keeps the cap honest).
-    if (kind == FireKind::RunEvent) {
+    if (kind == FireKind::RunEvent && !pf.manual) {
         for (const auto& q : g_pending)
-            if (q.kind == kind && q.name == name) return;
+            if (!q.manual && q.kind == kind && q.name == name) return;
     }
     if (g_pending.size() >= kMaxPending) {
         UE_LOGW("event_fire: pending replay queue full (%zu) -- dropping '%s'",
@@ -675,7 +904,11 @@ void ReplayInFlightRow(const std::string& rowName) {
     }
     DrainPending();
     // A row the game rolls as a special (the alien sounds) is run as one: runEvent has no case for its name.
-    PendingFire pf{ IsSpecialRow(rowName) ? FireKind::SpecialEvent : FireKind::RunEvent, rowName, /*activeOverride=*/true };
+    PendingFire pf{};
+    pf.kind = IsSpecialRow(rowName) ? FireKind::SpecialEvent : FireKind::RunEvent;
+    pf.name = rowName;
+    pf.specialName = "None";
+    pf.activeOverride = true;
     if (g_pending.empty()) {
         const ReplayStep step = TryReplay(pf);
         if (step == ReplayStep::Done) return;
@@ -731,7 +964,9 @@ void OnDisconnect() {
     g_zeroedSaveSlot = nullptr;
     g_zeroedSaveSlotIdx = -1;
     g_pending.clear();
+    g_fireDebt.clear();
     g_replayed.clear();
+    g_lastManualRequest.fill(std::chrono::steady_clock::time_point{});
     g_boundGen = 0;
     g_session.store(nullptr, std::memory_order_release);
 }
@@ -748,7 +983,9 @@ bool DevProbeClientRefusal() {
     // A reflected call holding no admission, as any client-native caller holds none: the gate must
     // refuse it.
     const uint64_t before = g_clientRefused;
+    g_refusalProbe = true;
     ue_wrap::Call(eventer, f);
+    g_refusalProbe = false;
     return g_clientRefused == before + 1;
 }
 

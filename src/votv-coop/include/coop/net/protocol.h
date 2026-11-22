@@ -31,7 +31,7 @@ inline constexpr uint32_t kMagic = 0x564D5450u;
 // This file is past the 1500-line hard cap and stays there: it is the single-feature exception the
 // rule names. One wire format, whose enum, payload structs and static_asserts are read together;
 // splitting it would put a kind's number in one file and its bytes in another.
-inline constexpr uint16_t kProtocolVersion = 293;
+inline constexpr uint16_t kProtocolVersion = 294;
 
 // Default LAN port (overridable via multivoid.ini "net.port=").
 inline constexpr uint16_t kDefaultPort = 47621;
@@ -697,6 +697,12 @@ enum class ReliableKind : uint16_t {
     // stood at its cut, and its connect replay sends it, alone, an op 2 for each prop whose tag this session published,
     // ahead of the snapshot's props: a copy the save loaded takes it, a prop the snapshot births waits for it by key.
     PropNametag = 261,
+
+    // Client to host: manually request one registered event verb. The host validates the exact
+    // event row and runs the native action; its result uses EventFire or an existing output lane.
+    // Dispatch 2 is request-only for named ambient/weather actions. Never relayed directly.
+    // EventFirePayload.
+    EventFireRequest = 262,
 
     // A disc-holding device's slot, addressed by the device's index in its own kind's list. Host
     // to all with the canonical set; a peer to the host with the outcome of a slot its own game
@@ -2688,14 +2694,18 @@ struct SleepStatePayload {
 };
 static_assert(sizeof(SleepStatePayload) == 36, "SleepStatePayload must be 36 bytes");
 
-// An event fire (EventFire), host to all: dispatch 0 runEvent, 1 runSpecialEvent, and the row name.
-// Receivers replay only policy-allowlisted rows. No special-event field: the only special is a
-// host-local random prank.
+// An event fire (EventFire), host to all, or manual event request (EventFireRequest), client to
+// host: dispatch 0 runEvent, 1 runSpecialEvent, 2 request-only ambient action. `name` is the row
+// or ambient menu key; `specialName` preserves runEvent's second FName. Host fires use dispatch
+// 0/1 only; clients replay only policy-allowlisted rows.
 struct EventFirePayload {
-    uint8_t dispatch;  // 1 -- event_fire_sync::FireKind (0 runEvent / 1 runSpecialEvent)
-    char name[31];     // 31 -- the row/case FName, ASCII, NUL-bound (longest live row = 18 chars)
+    uint8_t dispatch;   // 1 -- low 7 bits: EventFire 0 runEvent / 1 runSpecialEvent; request adds 2 ambient.
+                        // EventFire bit 7 marks a direct/manual fire so clients don't mistake it
+                        // for already-completed scheduled history.
+    char name[31];      // 31 -- row/case/menu key, ASCII, NUL-bound
+    char specialName[32];  // 32 -- runEvent's second FName; empty otherwise
 };
-static_assert(sizeof(EventFirePayload) == 32, "EventFirePayload must be 32 bytes");
+static_assert(sizeof(EventFirePayload) == 64, "EventFirePayload must be 64 bytes");
 
 // One in-flight event (EventSnapshot), host to a joiner: the event's class, the mapped list_events
 // row ('' when unmapped: logged and skipped) and its elapsed seconds.

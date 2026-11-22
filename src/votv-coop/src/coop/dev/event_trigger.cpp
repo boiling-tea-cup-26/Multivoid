@@ -14,9 +14,9 @@
 // The eventer resolution and the reflected runEvent/runSpecialEvent dispatch live in
 // coop/world/event_fire_sync, which is the single owner: the menu's fire goes through that seam
 // so the host's verb watches broadcast it to clients exactly once (a dev fire is entered with no
-// Blueprint caller, which the watch reports as the 'dev-call' origin). Only the ambient/weather
-// verb table stays here -- those are dev-only levers on daynightCycle/mainGamemode timers, never
-// on the wire.
+// Blueprint caller, which the watch reports as the 'dev-call' origin). The ambient/weather table
+// dispatches the host's native daynightCycle/mainGamemode verb; a client sends only the registered
+// action request, and the result crosses through an existing lane where one exists.
 
 namespace coop::dev::event_trigger {
 namespace {
@@ -193,7 +193,24 @@ const std::vector<EventInfo>& Events() {
 
 bool Trigger(const EventInfo& ev) {
     if (!::coop::dev_gate::Allowed()) {
-        UE_LOGW("event_trigger: REFUSED -- dev features are disabled while connected as a client");
+        // The client must not execute a world event locally: ask the host to run the same native
+        // verb, whose watch publishes its result back through EventFire and the existing state
+        // lanes. The host validates this exact menu row before doing anything.
+        namespace efs = coop::event_fire_sync;
+        const std::string name = ev.name;
+        const std::wstring wname(name.begin(), name.end());
+        switch (ev.dispatch) {
+            case Dispatch::RunEvent:
+                return efs::ClientRequest(efs::RequestKind::RunEvent, wname, L"None");
+            case Dispatch::RandomPrank:
+                return efs::ClientRequest(efs::RequestKind::RunEvent,
+                                          L"arirInteraction_0", L"ariralPrank");
+            case Dispatch::SpecialEvent:
+                return efs::ClientRequest(efs::RequestKind::SpecialEvent, wname, L"None");
+            case Dispatch::Ambient:
+                return efs::ClientRequest(efs::RequestKind::Ambient, wname, L"");
+        }
+        UE_LOGW("event_trigger: client request refused -- unknown dispatch");
         return false;
     }
     // Copy the POD fields -- the GT task may outlive this render-thread frame.
@@ -215,8 +232,8 @@ bool Trigger(const EventInfo& ev) {
     }
     // Ambient/weather layer: these verbs are NOT eventer cases -- the game fires them from
     // daynightCycle/mainGamemode timers + RNG rolls. "Maximally native" here = call the SAME
-    // UFunction the timer's success-arm calls, on the live instance (the exact pattern the
-    // autonomous fogprobe proved; autotest_fog_probe.cpp). Dev-only, never on the wire.
+    // UFunction the timer's success-arm calls, on the live instance. Connected clients route the
+    // action request to the host before reaching this host-only dispatch branch.
     GT::Post([name] {
         struct AmbientVerb { const wchar_t* cls; const wchar_t* fn; int boolArg; const wchar_t* boolName; };
         static const struct { const char* key; AmbientVerb v; } kAmbient[] = {

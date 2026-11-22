@@ -32,6 +32,10 @@ enum class FireKind : uint8_t {
     SpecialEvent = 1,  // trigger_eventer.runSpecialEvent(name)
 };
 
+// A client may ask the host for one registered native event. Ambient denotes a weather/menu
+// action; existing state lanes carry the result where implemented.
+enum class RequestKind : uint8_t { RunEvent = 0, SpecialEvent = 1, Ambient = 2 };
+
 // Game-thread pump: cache the session, register both host watches, drain pending replays and
 // hold the client's allEvents.Num at zero before the cycle tick. This prevents settime from
 // firing local scheduled events on a received clock sample. Disconnect restores the list.
@@ -42,11 +46,17 @@ void Install(coop::net::Session* session);
 // The ONE native-fire primitive. Posts the reflected runEvent/runSpecialEvent to the game thread
 // (resolution happens inside the task -- a SOLO host's dev menu has no session); the watches
 // emit every host fire to the clients, this call included, so a dev fire broadcasts exactly once
-// through the same seam. specialName crosses ONLY into the local native call (RandomPrank =
-// L"ariralPrank"); the wire carries the name each verb took -- for a prank roll, the CHOSEN case
-// emitted at its own runSpecialEvent. Callable from any thread (the menu's render thread
+// through the same seam. specialName is preserved in EventFire for runEvent (RandomPrank =
+// L"ariralPrank"); a prank roll also emits its chosen case at its own runSpecialEvent. Callable
+// from any thread (the menu's render thread
 // included). Returns false when refused as a running client, including while joining.
 bool HostFire(FireKind kind, const std::wstring& eventName, const std::wstring& specialName);
+
+// CLIENT: send a manual event request to the host. The host validates its row before dispatch.
+bool ClientRequest(RequestKind kind, const std::wstring& eventName, const std::wstring& specialName);
+
+// HOST: accept and validate a manual event request from a seated peer.
+void OnRequest(const coop::net::EventFirePayload& payload, uint8_t senderPeerSlot);
 
 // CLIENT receiver (event_dispatch_world, reliable drain, game thread): replay per policy, or
 // queue until the eventer resolves (join window). Host receiving its own kind = dropped upstream.

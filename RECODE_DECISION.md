@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
 Date: 2026-11-21  
-Status: **clean upstream branch prepared; no recode code changes or test build yet.**
+Status: **clean upstream branch confirmed by the user; event-sync candidates are being added and require in-game verification.**
 
 ## Decision
 
@@ -50,3 +50,22 @@ After testing the locally compiled upstream baseline, the user confirmed that it
 The b292 source has generic `EventCue` messages with a 16-byte `{cueId, x, y, z}` payload. The audited cooked `trigger_agrav` graph places the light's `SetVisibility(true)` call at bytecode offset 705 and its `K2_DestroyComponent` call at 1918. A later historical implementation's post-hook callback treated the second callback argument as the target component and the third as function parameters. The checked-in `ufunction_hook` contract passes the target UObject as `context`, the calling Blueprint actor as `sourceObject`, and the native return value as the third argument; a void function has no returned parameter frame. The new candidate uses `context` for the component and relies on the exact bytecode callsite for the `true` visibility edge.
 
 Because b292's cue payload lacks an occurrence identity, this change appends host-world epoch and occurrence sequence fields and increments the protocol to b293. The guest creates a local light from the cooked template on its own camera manager and destroys it on the matching stop cue, with bounded readiness retries and a safety timeout. The focused source-contract check and CI build/package checks are not runtime evidence; this feature remains unverified until the user tests the b293 package in-game.
+
+## Next event-sync group: manual trigger routing and coverage audit
+
+After the user directed broad trigger synchronization, the next change remains on the b292-based
+recode branch. Connected clients suppress their scheduled `allEvents` walk; a direct client
+eventer call or client developer-menu selection is canceled locally and sent as a registered
+`EventFireRequest`. The host validates the sender and event row, runs the native verb, and its
+existing post-watch publishes the committed event. Host manual fires also cross that watch. A
+manual bit distinguishes a direct replay-safe fire from scheduled-history dedupe without overriding
+the per-row no-replay policy. The host now retries an EventFire only when that peer's reliable
+queue explicitly refused admission, bounded by peer/session/world generation. The payload and
+request kind require protocol 294.
+
+The full row inventory, 21 known incomplete native event outputs, ambient weather limitations,
+and the request's drop conditions are recorded in
+[`docs/event-trigger-sync-audit.md`](docs/event-trigger-sync-audit.md). No row was added to the
+replay allowlist solely to make it appear synchronized: several outputs can spawn duplicate or
+client-active actors, target `getMainPlayer`, or have no mirror lane. The compile/package build
+and the user's two-instance result are pending; do not treat the source audit as runtime evidence.

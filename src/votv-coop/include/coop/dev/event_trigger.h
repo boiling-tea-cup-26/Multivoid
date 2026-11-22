@@ -83,9 +83,9 @@ struct EventInfo {
 // and carry no clock schedule.
 const std::vector<EventInfo>& Events();
 
-// Reflected dispatch on the host (runEvent / runSpecialEvent per ev.dispatch).
-// Refuses on a connected client (dev_gate) and while the eventer/verb is
-// unresolved. Safe to call from the menu render path (posts to the game thread).
+// Reflected dispatch on the host (runEvent / runSpecialEvent per ev.dispatch). A connected
+// client requests the registered row from the host and never executes it locally. Safe to call
+// from the menu render path (posts native dispatches to the game thread).
 bool Trigger(const EventInfo& ev);
 
 }  // namespace coop::dev::event_trigger

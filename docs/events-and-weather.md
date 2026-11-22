@@ -115,15 +115,25 @@ replaying them would deliver the effect twice; the level flips, story flags and 
 no lane carries are replayed through the same native verb. A prank's rolled case arrives as its
 own `runSpecialEvent` fire and meets the same policy: a graffiti decal, a scare box's arm or the
 alien sounds' noisers (each player's own, around them) are replayed, the outcome the host rolled;
-a case whose output rides a lane or stays on the host is not. A client runs no eventer verb of its own: the game's event and cheat menus are refused there,
-and the one eventer call it runs is the replay's own. A replay is skipped when the client's own
-passed list already carries the row, unless the host says the event is in flight; one whose world
-or eventer is not up yet waits and is retried each second. A special fired before a peer joins is
-not replayed to it: a scare box armed earlier stays unarmed on the joiner, and a decal it spawned
-reaches the joiner only if a lane carries it. The developer menu's event trigger dispatches through the same host path, so a
-forced event broadcasts like a scheduled one. It refuses running clients, including a join in
-progress, and a queued trigger is bound to the submitting session's start serial and world
-generation, so restarting the same session object cannot carry an old request into the next run.
+a case whose output rides a lane or stays on the host is not. A client does not run its own eventer
+verbs: a native eventer call is canceled and sent as an allowlisted request, and the developer
+menu sends the same request directly. The host checks the sender is seated and world-ready, checks
+the exact event row, rate-limits requests per peer and then runs the native verb once. Its post-call
+watch sends the committed event to clients; a request is never relayed as if it were a host result.
+Host-side manual eventer calls and scheduled fires use that same watch. A manual-fire bit keeps a
+deliberate replay-safe trigger from being suppressed just because the client's save already lists
+that scheduled row; normal scheduled fires retain their pass-list and per-session dedupe. Ambient
+weather buttons are validated separately and call the host's native weather verb, whose state or
+actor must still cross on its dedicated lane. The complete row-by-row verdict and known gaps are
+in [event-trigger-sync-audit.md](event-trigger-sync-audit.md).
+
+Fires received before the client's world or eventer is ready wait and retry each second. A
+special fired before a peer joins is not replayed to it: an armed scare box stays unarmed on the
+joiner, and a decal it spawned reaches the joiner only if a lane carries it. A late join's active
+event snapshot uses the same replay policy. If a request arrives before the client or host is
+world-ready, names an unregistered row, is rate-limited, cannot enter the reliable queue, or the
+script-gate watch did not resolve, the requested effect can fail; these conditions are documented
+in the audit rather than presented as a successful synchronization.
 
 The game keeps a registry of in-flight events: a reference count and the live event actors,
 maintained by the actors themselves. The host sees each event begin and end at `lib_C::setEvent`
@@ -235,7 +245,8 @@ harvest leaves the host's plant empty and the item with the harvester. Tests: `h
 | `ClockPose` (stream), `SkyState` | the host to all | the clock and the day number; the dome, the moon and the eye |
 | `WeatherState`, `LightningStrike`, `RedSky`, `BadSun` | the host to all | the state fields; a strike location; the red sky's edge; whether a Bad Sun exists |
 | `FireflySpawn` | each peer, relayed | one spawn |
-| `EventFire`, `EventSnapshot`, `EventCue` | the host to all; the host to one joiner; the host to all | a fired row; an in-flight event; an emitter cue |
+| `EventFireRequest` | a client to the host, never relayed | one registered manual event or ambient-action request |
+| `EventFire`, `EventSnapshot`, `EventCue` | the host to all; the host to one joiner; the host to all | a committed fired row; an in-flight event; an emitter cue |
 | `WorldActorSpawn`, `WorldActorDestroy`, `WorldActorPose` (stream) | the host to all | an event actor's birth with scale and blob; its death; full-rotation poses |
 | `PyramidGather` | the host to all | the gather commit |
 | `AlarmState` | either role | the alarm's active flag |

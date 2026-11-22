@@ -88,6 +88,7 @@ constexpr ClientAuthorship AuthorshipOf(ReliableKind k) {
     case ReliableKind::DeskScanEvent:
     case ReliableKind::ReelSlot:
     case ReliableKind::ReelEjectIntent:
+    case ReliableKind::EventFireRequest:
     case ReliableKind::DeskSndFx:
     case ReliableKind::LaptopState:
     case ReliableKind::PlayDeckEvent:

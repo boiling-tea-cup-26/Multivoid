@@ -9,7 +9,7 @@ PROTOCOL = (ROOT / "src/votv-coop/include/coop/net/protocol.h").read_text()
 
 checks = {
     "protocol bump and occurrence identity are explicit":
-        "kProtocolVersion = 293" in PROTOCOL and
+        "kProtocolVersion = 294" in PROTOCOL and
         "uint32_t hostWorldEpoch" in PROTOCOL and
         "uint32_t occurrenceSeq" in PROTOCOL and
         'sizeof(EventCuePayload) == 24' in PROTOCOL and
