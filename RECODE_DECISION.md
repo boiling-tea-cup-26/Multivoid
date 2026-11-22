@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
 Date: 2026-11-23
-Status: **b296 event-trigger-only candidate based on confirmed-safe b294; build and runtime verification pending.**
+Status: **b296 event-trigger-only build passed; user runtime verification pending.**
 
 ## Decision
 
@@ -77,14 +77,17 @@ runtime evidence.
 The user tested b295 and reported that client E pickup still often turns into a contextual
 activation, while the host remains normal. b295 added multiple things after b294, including
 microwave timer/activation context-action synchronization and several event-output/cord lanes. Since
-those additions were bundled, this evidence does not isolate the specific cause. Context-action
-synchronization is the leading suspect for the regression because it added a new hook on a native
-interaction path and the behavior reappeared in that candidate; this remains a hypothesis, not a
-proven causal finding.
+those additions were bundled, this evidence does not isolate the specific cause. The added
+context-action synchronization is the leading suspect because it hooks a native interaction path
+and the behavior reappeared in b295; it may be breaking the wider pickup flow. This remains a
+hypothesis, not a proven causal finding.
 
 Per the user's direction, the active branch is reset to the confirmed b294 source point
 (`a253622b2c5e361c4c002895784d1596a296dbdd`) and advanced directly to b296. b296 retains b294's
 event-trigger routing and b293 anti-gravity light sync, but excludes b295's microwave context
 actions, microwave effects, cord-head lane, `earthTp` replay/audio changes, and added event sounds.
 The b294 package is preserved; the b295 desktop package is removed. This narrows the candidate to
-the user's confirmed-safe event-sync set and is not a claim that the root cause is proven.
+the user's confirmed-safe event-sync set and is not a claim that the root cause is proven. b296's
+Windows Release build, ABI gate, and package drill passed in [CI run 45081585387](https://github.com/boiling-tea-cup-26/Multivoid/actions/runs/45081585387)
+at source commit `894fd4cc2927e01daf0eec8311eb16d2158f20a0`. The package and test checklist are in
+`~/Desktop/readytotest/recode/b296-event-triggers-only/`. The user must still test it in-game.
