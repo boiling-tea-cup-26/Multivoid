@@ -2,7 +2,7 @@
 
 **Branch:** `recode/b301-prop-pickup-bisect`, based on upstream `v0.9.0n-b292-dev`
 
-**Source state:** protocol 294, event request and replay changes pending build/runtime verification
+**Source state:** protocol 294, event request and replay changes pass Windows Release build, ABI gate, and package verification; two-instance runtime verification is pending
 **Evidence:** source paths and existing lane contracts. This is not a claim that these events have been verified in a two-instance game session.
 
 ## Authority and trigger flow
@@ -164,6 +164,8 @@ All eight menu actions are now requestable from a client and execute on the host
 - Actor source allowlists: `src/votv-coop/src/coop/creatures/npc_world_enum.cpp`,
   `src/votv-coop/include/ue_wrap/core/sdk_profile_names.h`.
 
+The candidate passed Windows Release build, ABI gate, and package verification in
+[CI run 45038505058](https://github.com/boiling-tea-cup-26/Multivoid/actions/runs/45038505058).
 Runtime verification still requires matching protocol-294 clients. Check a safe replayable event
 (`solar`) from the client event menu and then the host event menu; both instances should show one
 trigger per click. Check `rain ON` then `rain OFF` from the client and confirm the host's weather
