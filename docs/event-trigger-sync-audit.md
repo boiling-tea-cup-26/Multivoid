@@ -2,8 +2,8 @@
 
 **Branch:** `recode/b301-prop-pickup-bisect`, based on upstream `v0.9.0n-b292-dev`
 
-**Source state:** protocol 294, event request and replay changes pass Windows Release build, ABI gate, and package verification; two-instance runtime verification is pending
-**Evidence:** source paths and existing lane contracts. This is not a claim that these events have been verified in a two-instance game session.
+**Source state:** this audit describes b294 event request/replay behavior. b294 passed Windows Release, ABI gate, and package verification; the user later confirmed b294 is clean and safe in-game. The itemized event outcomes are not recorded here.
+**Evidence:** source paths, CI build record, and the user's overall b294 runtime confirmation. This does not mean every event row in this audit has been independently verified.
 
 ## Authority and trigger flow
 

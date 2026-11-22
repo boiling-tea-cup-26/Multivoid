@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
-Date: 2026-11-21  
-Status: **clean upstream branch confirmed by the user; event-sync candidates are being added and require in-game verification.**
+Date: 2026-11-23
+Status: **b296 event-trigger-only candidate based on confirmed-safe b294; build and runtime verification pending.**
 
 ## Decision
 
@@ -67,5 +67,24 @@ The full row inventory, 21 known incomplete native event outputs, ambient weathe
 and the request's drop conditions are recorded in
 [`docs/event-trigger-sync-audit.md`](docs/event-trigger-sync-audit.md). No row was added to the
 replay allowlist solely to make it appear synchronized: several outputs can spawn duplicate or
-client-active actors, target `getMainPlayer`, or have no mirror lane. The compile/package build
-and the user's two-instance result are pending; do not treat the source audit as runtime evidence.
+client-active actors, target `getMainPlayer`, or have no mirror lane. The user has since confirmed
+b294 is clean and safe in-game. The b296 candidate is based directly on b294 source, with only the
+protocol/build identifier advanced to 296. Do not treat source checks or package verification as
+runtime evidence.
+
+## b295 interaction regression and b296 scope
+
+The user tested b295 and reported that client E pickup still often turns into a contextual
+activation, while the host remains normal. b295 added multiple things after b294, including
+microwave timer/activation context-action synchronization and several event-output/cord lanes. Since
+those additions were bundled, this evidence does not isolate the specific cause. Context-action
+synchronization is the leading suspect for the regression because it added a new hook on a native
+interaction path and the behavior reappeared in that candidate; this remains a hypothesis, not a
+proven causal finding.
+
+Per the user's direction, the active branch is reset to the confirmed b294 source point
+(`a253622b2c5e361c4c002895784d1596a296dbdd`) and advanced directly to b296. b296 retains b294's
+event-trigger routing and b293 anti-gravity light sync, but excludes b295's microwave context
+actions, microwave effects, cord-head lane, `earthTp` replay/audio changes, and added event sounds.
+The b294 package is preserved; the b295 desktop package is removed. This narrows the candidate to
+the user's confirmed-safe event-sync set and is not a claim that the root cause is proven.
