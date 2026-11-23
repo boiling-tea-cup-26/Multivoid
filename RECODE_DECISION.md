@@ -149,4 +149,8 @@ deactivated/falling prop form, (4) each again after settling, (5) a stationary c
 with a deliberate hold-E, and (6) host pickup as control. If the active test is the Omega character,
 record that separately because this b298 patch does not target it. Confirm a successful pickup uses
 the normal hand state and can rotate; a sound or changed animation alone is not success. Preserve
-b297 as the previous test artifact. Do not advance to another patch until this result is recorded.
+b297 as the previous test artifact. The b298 Windows x64 Release DLL was built locally from source commit
+`e3c2124c127be798ace7d5ae75b3083d997f6b92`. The ABI gate and negative-control drill passed;
+manual ZIP structure, manifest, DLL identity and CRC verification passed. The repository PowerShell
+package drill was unavailable because `pwsh` is not installed. Package and hashes are recorded in
+`RECODE_TEST_LOG.md`. Do not advance to another patch until this result is recorded.
