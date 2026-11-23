@@ -111,6 +111,13 @@ the active drive can re-latch physics on its next tick. Static/frozen targets, n
 context-only props, and host-side input are not modified.
 
 This is an intentional causal test of the one source-supported failure path, not a fix guarantee.
-The source has been changed and versioned as b297, but no Windows build or in-game result is yet
-recorded. Omega smoothing, NPC collision, target caching, and interpolation were not changed
-because this pass did not establish a causal link from those systems to this pickup failure.
+The Windows x64 Release DLL was built locally from source commit
+`10246304ed350fff7082466cc446c3c38d81955f`, using the retained
+Linux clang-cl toolchain and cached dependencies. The isolated build staging copy required
+compiler-only CMake/assembler adaptations (per-file Opus SSE4.1 flags, language-scoped compiler
+flags, and equivalent MASM label syntax); no gameplay C++ sources were changed in that staging
+copy. ABI gate, package drill, and ZIP integrity checks passed. The package is in
+`~/Desktop/readytotest/recode/b297-prop-pickup/`; see the test ledger for hashes. Gameplay remains
+unverified until the user tests it. Omega smoothing, NPC collision, target caching, and
+interpolation were not changed because this pass did not establish a causal link from those
+systems to this pickup failure.
