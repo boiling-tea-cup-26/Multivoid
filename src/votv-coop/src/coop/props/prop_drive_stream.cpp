@@ -52,6 +52,7 @@ struct Drive {
 // tick, not nudged once: said loudly, once, as the held-prop drive says it (remote_prop).
 constexpr uint32_t kRelatchLoud = 60;
 std::unordered_map<uint32_t, Drive>   g_drives;    // eid -> drive
+bool g_localRoleIsClient = false;                   // updated on the game-thread drive tick
 std::unordered_map<uint32_t, uint8_t> g_endedGen;  // eid -> the generation its end edge closed
 // eid -> the generation whose END pose ApplyEnd wrote, and onto which actor: captured with its slot
 // serial, so a successor re-created in the same slot does not read as the actor the pose was written on.
@@ -298,6 +299,7 @@ void ReleaseHost(const coop::net::PropDriveEndPayload& end) {
 
 void TickApplyAndDrive(coop::net::Session& s) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::TickApplyAndDrive");
+    g_localRoleIsClient = s.role() == coop::net::Role::Client;
     const uint64_t nowMs = AD::NowMs();
     g_batch.clear();
     // The host's own batch slot is never written (a client's rows go to the origin stores), so only a client drains it.
@@ -437,6 +439,24 @@ bool IsParked(void* actor) {
     return false;
 }
 
+bool PrepareNativePickup(void* actor) {
+    UE_ASSERT_GAME_THREAD("prop_drive_stream::PrepareNativePickup");
+    if (!g_localRoleIsClient || !actor || PhysicsStaysOff(actor)) return false;
+    for (auto& kv : g_drives) {
+        Drive& dr = kv.second;
+        if (dr.d.LiveActor() != actor || !dr.physicsParked || !dr.d.mesh) continue;
+        // Native useAction routes a non-simulating hit to its contextual-action branch. Give the
+        // client mirror its physics back for this native input so pickupObject can initialize the
+        // game's real PhysicsHandle/timeline. The live drive remains registered: if native pickup
+        // fails, TickApplyAndDrive re-latches physics; if it succeeds, the next tick yields the
+        // generation to the local hand and the existing held-prop stream takes ownership.
+        coop::prop_park::Unpark(actor, dr.d.mesh, /*rootSimulates=*/true);
+        dr.physicsParked = false;
+        return true;
+    }
+    return false;
+}
+
 bool IsCorrectionStale(uint32_t eid, uint8_t gen, bool open) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::IsCorrectionStale");
     if (const auto d = g_drives.find(eid); d != g_drives.end()) return GenAfter(d->second.gen, gen);
@@ -452,6 +472,7 @@ bool IsCorrectionStale(uint32_t eid, uint8_t gen, bool open) {
 }
 
 void OnDisconnect() {
+    g_localRoleIsClient = false;
     for (auto& kv : g_drives) GiveBackPhysics(kv.second, kv.second.d.LiveActor());
     coop::prop_child_release::OnDisconnect();   // the waiting doors are given back with their parents
     g_drives.clear();

@@ -58,6 +58,12 @@ void CloseGen(uint32_t eid, uint8_t gen);
 // would move it or re-run its init() leaves it alone, as it leaves a held prop. Game thread.
 bool IsParked(void* actor);
 
+// On a client, temporarily hand a locally aimed host-driven prop back to native physics
+// immediately before the game's E handler runs. This lets native pickup initialize its
+// PhysicsHandle and timeline; the normal held-prop stream then takes over the handoff.
+// Returns true only when an active client PropDrive park was released.
+bool PrepareNativePickup(void* actor);
+
 // True when a join-window correction read under drive context (gen, open) is older than what this
 // copy holds of that prop's drive: a live drive row of a newer generation, or else the END pose
 // ApplyEnd wrote onto the eid's CURRENTLY bound actor, of a newer generation, or of the same one

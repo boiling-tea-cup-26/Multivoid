@@ -91,3 +91,26 @@ the user's confirmed-safe event-sync set and is not a claim that the root cause 
 Windows Release build, ABI gate, and package drill passed in [CI run 45081585387](https://github.com/boiling-tea-cup-26/Multivoid/actions/runs/45081585387)
 at source commit `894fd4cc2927e01daf0eec8311eb16d2158f20a0`. The package and test checklist are in
 `~/Desktop/readytotest/recode/b296-event-triggers-only/`. The user must still test it in-game.
+
+## b297 native pickup handoff hypothesis
+
+Source inspection of the b292-based PropDrive path found that an incoming active pose parks a
+client mirror by disabling its physics (`prop_drive_stream::ApplyPose` -> `prop_park::Park`). The
+cooked `mainPlayer_C::useAction` checks `IsSimulatingPhysics` before choosing `pickupObject`; a
+kinematic hit follows its contextual-use branch. This is a concrete source-level explanation for
+the reported case where a host-thrown, still-driven prop is visible but a client E press takes the
+wrong path. It is not runtime proof, and it does not explain the separate Omega motion report.
+
+The b297 hypothesis changes only the client E-input edge for an actor currently parked by an
+active PropDrive row. Immediately before the existing native input event runs, it gives that
+mirror physics back. The original game `useAction`, `pickupObject`, PhysicsHandle, and grab
+timeline still run; there is no synthetic pickup or new network message. If pickup succeeds, the
+existing PropDrive tick recognizes the local hand and yields its generation, while the existing
+held-prop stream and host arbitration handle the cross-peer handoff. If pickup does not happen,
+the active drive can re-latch physics on its next tick. Static/frozen targets, non-driven props,
+context-only props, and host-side input are not modified.
+
+This is an intentional causal test of the one source-supported failure path, not a fix guarantee.
+The source has been changed and versioned as b297, but no Windows build or in-game result is yet
+recorded. Omega smoothing, NPC collision, target caching, and interpolation were not changed
+because this pass did not establish a causal link from those systems to this pickup failure.

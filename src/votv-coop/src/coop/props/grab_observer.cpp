@@ -10,6 +10,7 @@
 #include "ue_wrap/core/sdk_profile.h"
 #include "ue_wrap/core/types.h"
 #include "ue_wrap/facts/function_row.h"
+#include "coop/props/prop_drive_stream.h"  // release a client PropDrive park before native E pickup
 
 #include <atomic>
 #include <cstdint>
@@ -169,6 +170,20 @@ void GrabObserver_InpActEvt_use(void* self, void* /*function*/, void* /*params*/
     UE_LOGI("grab_hook[InpActEvt.use]: self=%p grabbing_actor(after)=%p", self, gs.grabbingActor);
 }
 
+void GrabObserver_InpActEvt_use_PRE(void* self, void* /*function*/, void* /*params*/) {
+    // A PropDrive mirror is deliberately kinematic between host pose rows. The game's native
+    // useAction checks IsSimulatingPhysics before calling pickupObject; while the mirror is parked,
+    // it instead enters the contextual-use path. Restore physics only for this client's aimed,
+    // actively driven prop immediately before the original input graph runs. This keeps the
+    // game's own pickupObject, PhysicsHandle, and grab timeline intact; all other targets and all
+    // host input remain on the original path.
+    if (!self || !ue_wrap::game_thread::IsGameThread()) return;
+    ue_wrap::engine::MainPlayerGrabState gs{};
+    if (!ue_wrap::engine::ReadMainPlayerGrabState(self, gs) || gs.grabbingActor) return;
+    void* const actor = ue_wrap::engine::ReadMainPlayerHitActor(self);
+    if (actor) coop::prop_drive_stream::PrepareNativePickup(actor);
+}
+
 void GrabObserver_grab_Update(void* self, void* /*function*/, void* /*params*/) {
     // The per-tick timeline update. Log the first three and every thirtieth after (the same
     // throttle as the set-target observer, so a short test still sees activity); atomic for the
@@ -260,6 +275,7 @@ void Install() {
     reg(kRowSetPhysicsAngularVelocityInDegrees, GrabObserver_PrimComp_SetAngularVelocity_PRE, /*pre=*/true);
 
     // Secondary: the blueprint timeline and input on the player.
+    reg(kRowUseInputEvent,    GrabObserver_InpActEvt_use_PRE,  /*pre=*/true);
     reg(kRowUseInputEvent,    GrabObserver_InpActEvt_use,      /*pre=*/false);
     reg(kRowGrabUpdateFunc,   GrabObserver_grab_Update,        /*pre=*/false);
     reg(kRowGrabFinishedFunc, GrabObserver_grab_Finished_PRE,  /*pre=*/true);
