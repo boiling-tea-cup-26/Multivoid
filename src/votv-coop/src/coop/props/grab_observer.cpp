@@ -172,16 +172,16 @@ void GrabObserver_InpActEvt_use(void* self, void* /*function*/, void* /*params*/
 
 void GrabObserver_InpActEvt_use_PRE(void* self, void* /*function*/, void* /*params*/) {
     // A PropDrive mirror is deliberately kinematic between host pose rows. The game's native
-    // useAction checks IsSimulatingPhysics before calling pickupObject; while the mirror is parked,
-    // it instead enters the contextual-use path. Restore physics only for this client's aimed,
-    // actively driven prop immediately before the original input graph runs. This keeps the
-    // game's own pickupObject, PhysicsHandle, and grab timeline intact; all other targets and all
-    // host input remain on the original path.
+    // useAction checks IsSimulatingPhysics on the raycast hit component before calling pickupObject.
+    // Restore physics only for the client's actively driven prop's exact root/mesh hit body. Static,
+    // non-driven, and frozen targets keep the game's original contextual-action path; the game's own
+    // pickupObject, PhysicsHandle, and grab timeline still perform the pickup.
     if (!self || !ue_wrap::game_thread::IsGameThread()) return;
     ue_wrap::engine::MainPlayerGrabState gs{};
     if (!ue_wrap::engine::ReadMainPlayerGrabState(self, gs) || gs.grabbingActor) return;
     void* const actor = ue_wrap::engine::ReadMainPlayerHitActor(self);
-    if (actor) coop::prop_drive_stream::PrepareNativePickup(actor);
+    void* const component = ue_wrap::engine::ReadMainPlayerHitComponent(self);
+    if (actor && component) coop::prop_drive_stream::PrepareNativePickup(actor, component);
 }
 
 void GrabObserver_grab_Update(void* self, void* /*function*/, void* /*params*/) {

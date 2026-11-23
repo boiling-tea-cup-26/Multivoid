@@ -121,3 +121,32 @@ copy. ABI gate, package drill, and ZIP integrity checks passed. The package is i
 unverified until the user tests it. Omega smoothing, NPC collision, target caching, and
 interpolation were not changed because this pass did not establish a causal link from those
 systems to this pickup failure.
+
+## b298 hit-component pickup attempt
+
+The user's b297 test showed that a moving ordinary prop still did not enter the hand. The user
+then confirmed the same moving-only pickup failure for Kerfur while active/walking and while
+deactivated/falling, with pickup possible after it settles. The exact Kerfur form in the active test
+was not specified. Source distinguishes the regular Kerfus (a prop, claimed into PropDrive while
+active by `coop/creatures/kerfus_state.cpp`) from the Omega active form (an NPC character); the
+powered-off Omega is a prop (`docs/npcs-and-kerfur.md`). Incoming PropDrive pose application parks a
+client prop's physics. Thus the normal active Kerfus and deactivated prop cases share the prop path;
+an active Omega test would use the separate NPC pose path and is not covered by this b298 patch.
+
+b298 is a narrowly scoped follow-up attempt, not a claimed fix. The native `useAction` decision
+tests `IsSimulatingPhysics` on the raycast's hit component. b297 restored simulation through the
+prop's resolved static mesh without checking that this was the component the native graph tested.
+b298 now passes the hit component to `PrepareNativePickup`, and permits the handoff only when that
+component is the driven prop's root or mesh and is a primitive component. If the hit is on another
+component, it leaves the prop and native input untouched. It does not add a client pickup mechanic,
+network message, or interpolation change. Ordinary static/non-driven props retain their original
+contextual-action path; R-held luggage is untouched.
+
+This component mismatch is a source-grounded explanation for why b297's unpark attempt could
+change the branch without completing pickup, but runtime confirmation is pending. Test b298 with:
+(1) a host-thrown ordinary prop while moving, (2) the active regular Kerfus while moving, (3) the
+deactivated/falling prop form, (4) each again after settling, (5) a stationary contextual-action prop
+with a deliberate hold-E, and (6) host pickup as control. If the active test is the Omega character,
+record that separately because this b298 patch does not target it. Confirm a successful pickup uses
+the normal hand state and can rotate; a sound or changed animation alone is not success. Preserve
+b297 as the previous test artifact. Do not advance to another patch until this result is recorded.

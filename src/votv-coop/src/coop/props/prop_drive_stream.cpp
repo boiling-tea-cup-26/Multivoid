@@ -439,18 +439,25 @@ bool IsParked(void* actor) {
     return false;
 }
 
-bool PrepareNativePickup(void* actor) {
+bool PrepareNativePickup(void* actor, void* hitComponent) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::PrepareNativePickup");
-    if (!g_localRoleIsClient || !actor || PhysicsStaysOff(actor)) return false;
+    if (!g_localRoleIsClient || !actor || !hitComponent || PhysicsStaysOff(actor)) return false;
     for (auto& kv : g_drives) {
         Drive& dr = kv.second;
         if (dr.d.LiveActor() != actor || !dr.physicsParked || !dr.d.mesh) continue;
+        void* const root = E::RootComponentOf(actor);
+        // useAction tests the component in its raycast HitResult. Only hand native physics back when
+        // that exact body is the prop's mesh or root; enabling a sibling/collider would leave the
+        // tested body kinematic and could disturb unrelated component physics.
+        if (hitComponent != dr.d.mesh && hitComponent != root) continue;
+        if (!E::IsPrimitiveComponent(hitComponent)) continue;
         // Native useAction routes a non-simulating hit to its contextual-action branch. Give the
-        // client mirror its physics back for this native input so pickupObject can initialize the
-        // game's real PhysicsHandle/timeline. The live drive remains registered: if native pickup
+        // exact hit body its physics back for this native input so pickupObject sees the same body
+        // the IsSimulatingPhysics query tests. The live drive remains registered: if native pickup
         // fails, TickApplyAndDrive re-latches physics; if it succeeds, the next tick yields the
         // generation to the local hand and the existing held-prop stream takes ownership.
         coop::prop_park::Unpark(actor, dr.d.mesh, /*rootSimulates=*/true);
+        if (hitComponent != dr.d.mesh && !E::SetComponentSimulatePhysics(hitComponent, true)) return false;
         dr.physicsParked = false;
         return true;
     }
