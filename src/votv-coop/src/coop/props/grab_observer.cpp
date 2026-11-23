@@ -7,6 +7,7 @@
 #include "ue_wrap/core/game_thread.h"
 #include "ue_wrap/core/log.h"
 #include "ue_wrap/core/reflection.h"
+#include "ue_wrap/core/ufunction_hook.h"
 #include "ue_wrap/core/sdk_profile.h"
 #include "ue_wrap/core/types.h"
 #include "ue_wrap/facts/function_row.h"
@@ -39,6 +40,8 @@ UE_FACT_FN(kRowSetPhysicsAngularVelocityInDegrees, "grab_observer", L"PrimitiveC
            L"SetPhysicsAngularVelocityInDegrees", Declared);
 UE_FACT_FN(kRowUseInputEvent, "grab_observer", L"mainPlayer_C",
            L"InpActEvt_use_K2Node_InputActionEvent_41", Declared);
+UE_FACT_FN(kRowIsSimulatingPhysics, "grab_observer", L"PrimitiveComponent",
+           L"IsSimulatingPhysics", Declared);
 // The `grab` timeline's tick and end: a timeline's name is content, stable across a recook.
 UE_FACT_FN(kRowGrabUpdateFunc, "grab_observer", L"mainPlayer_C", L"grab__UpdateFunc", Declared);
 UE_FACT_FN(kRowGrabFinishedFunc, "grab_observer", L"mainPlayer_C", L"grab__FinishedFunc", Declared);
@@ -53,6 +56,7 @@ std::atomic<bool> g_installed{false};
 // and pumping that at ~60 Hz is the install-loop bomb. Wait N ticks between retries; 60
 // ticks is about half a second, matching the NPC sync's countdown.
 std::atomic<int> g_installRetryCountdown{0};
+void* g_useActionFn = nullptr;
 
 // Primary: the physics-handle component, the light grab path. `self` is the handle, owned by
 // the player as its grab handle; to learn which prop is held, read the owning player's
@@ -170,18 +174,20 @@ void GrabObserver_InpActEvt_use(void* self, void* /*function*/, void* /*params*/
     UE_LOGI("grab_hook[InpActEvt.use]: self=%p grabbing_actor(after)=%p", self, gs.grabbingActor);
 }
 
-void GrabObserver_InpActEvt_use_PRE(void* self, void* /*function*/, void* /*params*/) {
-    // A PropDrive mirror is deliberately kinematic between host pose rows. The game's native
-    // useAction checks IsSimulatingPhysics on the raycast hit component before calling pickupObject.
-    // Restore physics only for the client's actively driven prop's exact root/mesh hit body. Static,
-    // non-driven, and frozen targets keep the game's original contextual-action path; the game's own
-    // pickupObject, PhysicsHandle, and grab timeline still perform the pickup.
-    if (!self || !ue_wrap::game_thread::IsGameThread()) return;
-    ue_wrap::engine::MainPlayerGrabState gs{};
-    if (!ue_wrap::engine::ReadMainPlayerGrabState(self, gs) || gs.grabbingActor) return;
-    void* const actor = ue_wrap::engine::ReadMainPlayerHitActor(self);
-    void* const component = ue_wrap::engine::ReadMainPlayerHitComponent(self);
-    if (actor && component) coop::prop_drive_stream::PrepareNativePickup(actor, component);
+void GrabObserver_IsSimulatingPhysics_POST(void* component, void* /*function*/, void* /*params*/) {
+    // The cooked mainPlayer_C::useAction graph calls this native query on hitcomponent at its
+    // pickup/context branch. Only intervene at that exact call site; unrelated physics queries
+    // (including contextual-action discovery and movement) retain their native result.
+    if (!component || !g_useActionFn) return;
+    const auto caller = ue_wrap::ufunction_hook::CurrentCallerFrame();
+    if (caller.function != g_useActionFn) return;
+    bool* const result = static_cast<bool*>(ue_wrap::ufunction_hook::CurrentResult());
+    if (!result || *result) return;
+    void* const actor = R::OuterOf(component);
+    if (!actor || !coop::prop_drive_stream::PrepareNativePickup(actor, component)) return;
+    // PrepareNativePickup has restored the parked body. The Blueprint continues through its
+    // original pickupObject -> PhysicsHandle/timeline path, with no synthetic grab operation.
+    *result = true;
 }
 
 void GrabObserver_grab_Update(void* self, void* /*function*/, void* /*params*/) {
@@ -275,10 +281,25 @@ void Install() {
     reg(kRowSetPhysicsAngularVelocityInDegrees, GrabObserver_PrimComp_SetAngularVelocity_PRE, /*pre=*/true);
 
     // Secondary: the blueprint timeline and input on the player.
-    reg(kRowUseInputEvent,    GrabObserver_InpActEvt_use_PRE,  /*pre=*/true);
     reg(kRowUseInputEvent,    GrabObserver_InpActEvt_use,      /*pre=*/false);
     reg(kRowGrabUpdateFunc,   GrabObserver_grab_Update,        /*pre=*/false);
     reg(kRowGrabFinishedFunc, GrabObserver_grab_Finished_PRE,  /*pre=*/true);
+
+    // The one native decision gate inside mainPlayer_C::useAction. The caller-frame check in the
+    // post-hook keeps this result override limited to that Blueprint function.
+    const auto isSim = ue_wrap::facts::Resolve(kRowIsSimulatingPhysics);
+    const auto useAction = R::FindFunction(playerCls, L"useAction");
+    if (isSim && useAction) {
+        g_useActionFn = useAction;
+        if (!ue_wrap::ufunction_hook::InstallPostHook(isSim, &GrabObserver_IsSimulatingPhysics_POST)) {
+            g_useActionFn = nullptr;
+            UE_LOGW("grab_hook: IsSimulatingPhysics native post-hook failed; moving client props retain native behavior");
+        } else {
+            UE_LOGI("grab_hook: IsSimulatingPhysics override scoped to mainPlayer_C.useAction installed");
+        }
+    } else {
+        UE_LOGW("grab_hook: could not resolve useAction / IsSimulatingPhysics native function");
+    }
 
     g_installed.store(true, std::memory_order_release);
     UE_LOGI("grab_hook: Stage 1+ core observers installed (5 PHC + 2 PCC + 1 PrimComp.AddImpulse + 2 PrimComp.SetVel + 3 BP-Timeline) -- press E on a prop to see hook lines");

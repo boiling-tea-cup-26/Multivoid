@@ -154,3 +154,13 @@ b297 as the previous test artifact. The b298 Windows x64 Release DLL was built l
 manual ZIP structure, manifest, DLL identity and CRC verification passed. The repository PowerShell
 package drill was unavailable because `pwsh` is not installed. Package and hashes are recorded in
 `RECODE_TEST_LOG.md`. Do not advance to another patch until this result is recorded.
+
+## b298 user result and b299 native-query handoff
+
+The user tested b298 and reported that moving props still do not pick up. Holding E on Kerfur now deactivates it without allowing the intended pickup/action; b298 therefore failed and introduced or exposed an additional hold-E regression. This is runtime evidence against the b298 pre-input mutation.
+
+The cooked `mainPlayer_C::useAction` graph provides a more precise interception point than the `InpActEvt_use` input event. At bytecode offset 1572 it calls `IsSimulatingPhysics` on the raycast's `hitcomponent`; a false result skips `pickupObject(hitResult)` and enters the `issec`/recursive context-use branch. When pickup is reached, the native game path assigns `grabbing_component`, checks its physics at offset 94202, and initializes `PhysicsHandleComponent.GrabComponentAtLocationWithRotation` at offset 94761. Thus both the route decision and pickup initialization depend on the physics state of the hit component itself.
+
+b299 rolls back the b298 broad input-edge behavior. Instead it hooks the native `IsSimulatingPhysics` implementation and only changes a false answer when the native caller frame is exactly `mainPlayer_C::useAction`, the queried component belongs to an active client PropDrive, and that mirror's parked physics is successfully restored. It then returns true to the original Blueprint, which continues through the game's own pickup and PhysicsHandle/timeline flow. Queries from other callers are untouched; if `useAction` handles a contextual action before reaching this physics gate, that action is untouched. No wire payload or interpolation behavior changes. This is a source-grounded alternative hypothesis, not a verified fix; it still needs two-instance testing.
+
+The b299 Windows x64 build was compiled from b292-based recode source commit `a1ae63c0dec00f9bc1be9f9fb5dd364f6558b52a`, with only the targeted grab observer change and protocol/build identifier 299. Build, ABI gate and package integrity checks passed. The b299 package is in `~/Desktop/readytotest/recode/b299-useaction-physics-gate/`. Gameplay remains unverified. Keep b297 and b298 packages intact as comparison artifacts.
