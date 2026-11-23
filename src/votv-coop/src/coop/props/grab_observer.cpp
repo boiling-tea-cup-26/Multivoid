@@ -40,7 +40,7 @@ UE_FACT_FN(kRowSetPhysicsAngularVelocityInDegrees, "grab_observer", L"PrimitiveC
            L"SetPhysicsAngularVelocityInDegrees", Declared);
 UE_FACT_FN(kRowUseInputEvent, "grab_observer", L"mainPlayer_C",
            L"InpActEvt_use_K2Node_InputActionEvent_41", Declared);
-UE_FACT_FN(kRowIsSimulatingPhysics, "grab_observer", L"PrimitiveComponent",
+UE_FACT_FN(kRowIsSimulatingPhysics, "grab_observer", L"SceneComponent",
            L"IsSimulatingPhysics", Declared);
 // The `grab` timeline's tick and end: a timeline's name is content, stable across a recook.
 UE_FACT_FN(kRowGrabUpdateFunc, "grab_observer", L"mainPlayer_C", L"grab__UpdateFunc", Declared);
@@ -228,10 +228,11 @@ void Install() {
     void* phcCls = R::FindClass(P::name::PhysicsHandleComponentClass);
     void* pccCls = R::FindClass(P::name::PhysicsConstraintComponentClass);
     void* primCls = R::FindClass(P::name::PrimitiveComponentClass);
+    void* sceneCls = R::FindClass(P::name::SceneComponentClass);
     void* playerCls = R::FindClass(P::name::MainPlayerClass);
-    if (!phcCls || !pccCls || !primCls || !playerCls) {
-        UE_LOGW("grab_hook: class not found yet (PHC=%p, PCC=%p, PrimComp=%p, mainPlayer=%p) -- retry in 60 ticks",
-                phcCls, pccCls, primCls, playerCls);
+    if (!phcCls || !pccCls || !primCls || !sceneCls || !playerCls) {
+        UE_LOGW("grab_hook: class not found yet (PHC=%p, PCC=%p, PrimComp=%p, SceneComp=%p, mainPlayer=%p) -- retry in 60 ticks",
+                phcCls, pccCls, primCls, sceneCls, playerCls);
         g_installRetryCountdown.store(60, std::memory_order_relaxed);
         return;
     }
@@ -287,7 +288,10 @@ void Install() {
 
     // The one native decision gate inside mainPlayer_C::useAction. The caller-frame check in the
     // post-hook keeps this result override limited to that Blueprint function.
-    const auto isSim = ue_wrap::facts::Resolve(kRowIsSimulatingPhysics);
+    // IsSimulatingPhysics is declared on USceneComponent. PrimitiveComponent inherits it and
+    // supplies the native physics implementation; resolving against PrimitiveComponent's own
+    // declaration list returns nothing, so bind the exact declaring class explicitly.
+    const auto isSim = ue_wrap::facts::ResolveOn(kRowIsSimulatingPhysics, sceneCls);
     const auto useAction = R::FindFunction(playerCls, L"useAction");
     if (isSim && useAction) {
         g_useActionFn = useAction;
