@@ -16,6 +16,7 @@
 #include "coop/props/prop_wire_parity.h"      // the join converge's own physics restore
 #include "coop/player/local_streams.h"
 #include "coop/player/hand_item.h"
+#include "coop/player/players_registry.h"
 #include "coop/props/remote_prop.h"           // ResolveLiveActorByEid, IsActorUnderAnyDrive
 #include "ue_wrap/actors/prop.h"
 #include "ue_wrap/core/cached_obj_ref.h"
@@ -45,6 +46,8 @@ struct Drive {
     AD::ActiveDrive d;
     uint8_t gen = 0;
     bool physicsParked = false;   // this module turned simulation off, so the end turns it on
+    bool pickupPrepared = false; // native useAction passed route selection; awaiting pickupObject's hit-body gate
+    ue_wrap::CachedObjRef pickupBody; // non-mesh hit body temporarily enabled for this native pickup
     uint32_t relatches = 0;       // the game switched the parked copy's simulation back on, this park
 };
 
@@ -81,6 +84,14 @@ bool GenAfter(uint8_t a, uint8_t b) { return static_cast<int8_t>(a - b) > 0; }
 // and left so, the stuck wall-attachable rule the held-prop receiver applies.
 bool PhysicsStaysOff(void* actor) { return PR::IsFrozen(actor) || PR::IsStatic(actor); }
 
+void FinishPickupAttempt(Drive& dr, void* actor, bool keepHitBody) {
+    void* const body = dr.pickupBody.Get();
+    dr.pickupBody.Reset();
+    dr.pickupPrepared = false;
+    if (body && !keepHitBody && actor && R::OuterOf(body) == actor)
+        E::SetComponentSimulatePhysics(body, false);
+}
+
 // By eid first -- the registry's O(1) row, which a joiner's keyed copy carries from the bind --
 // then the key INDEX; never the cold object-array walk the general key resolver falls back to.
 void* Resolve(uint32_t eid, const coop::net::WireKey& key) {
@@ -90,6 +101,7 @@ void* Resolve(uint32_t eid, const coop::net::WireKey& key) {
 }
 
 void GiveBackPhysics(Drive& dr, void* actor) {
+    FinishPickupAttempt(dr, actor, /*keepHitBody=*/false);
     if (!dr.physicsParked || !actor) return;
     const bool simulate = !PhysicsStaysOff(actor);
     coop::prop_park::Unpark(actor, dr.d.mesh, simulate);
@@ -103,6 +115,14 @@ void GiveBackPhysics(Drive& dr, void* actor) {
 bool IsOwnHand(void* actor) {
     return actor == coop::local_streams::LastHeldActor() || coop::hand_item::IsHandAxisActor(actor);
 }
+
+// Pump ordering runs TickGameplay (including PropDrive) before local_streams refreshes LastHeldActor.
+// Read the game's current field as well, so a just-created native hand is not missed for one pump.
+bool IsOwnHandNow(void* actor) {
+    if (IsOwnHand(actor)) return true;
+    void* const localPlayer = coop::players::Registry::Get().Local();
+    return localPlayer && E::IsMainPlayerGrabbing(localPlayer, actor);
+}
 // Both records only ever move forward. The tick can yield an OLDER generation's row in the same
 // pass that the first pose yielded a newer one, and writing the older one back reopened the newer
 // generation: its end then found no yield and parked the stale rest pose after the hand let go.
@@ -112,7 +132,7 @@ void AdvanceGen(std::unordered_map<uint32_t, uint8_t>& m, uint32_t eid, uint8_t 
     else if (GenAfter(gen, it->second)) it->second = gen;
 }
 void YieldToHand(uint32_t eid, uint8_t gen, Drive* dr, void* actor) {
-    if (dr && actor && IsOwnHand(actor)) GiveBackPhysics(*dr, actor);
+    if (dr && actor && IsOwnHandNow(actor)) GiveBackPhysics(*dr, actor);
     AdvanceGen(g_endedGen, eid, gen);
     AdvanceGen(g_yieldedGen, eid, gen);
     if (actor) coop::prop_child_release::OnParentReleased(actor);   // the stream let go: a waiting door goes next
@@ -190,7 +210,7 @@ void ApplyPose(const coop::net::PropDriveRow& e, uint64_t nowMs, const char* who
         if (it->second.gen == e.ctx) {
             // The steady state: the row already names the actor. No resolve, no string.
             if (void* live = it->second.d.LiveActor()) {
-                if (!coop::prop_drive_host::InAHand(live)) {   // a hand's stream wins
+                if (!coop::prop_drive_host::InAHand(live) && !IsOwnHandNow(live)) {   // a hand's stream wins
                     if (dev::DriveView* v = DevViewOf(eid, e.ctx)) {
                         ++v->rows;
                         v->lastRowLoc = ue_wrap::FVector{e.x, e.y, e.z};
@@ -219,7 +239,7 @@ void ApplyPose(const coop::net::PropDriveRow& e, uint64_t nowMs, const char* who
     if (!PR::IsDescendantOfProp(actor)) return;
     // A hand's stream on the same prop wins: the holder is its syncer for as long as it
     // holds it, and the host closes this stream the moment it sees the hand.
-    if (coop::prop_drive_host::InAHand(actor)) {
+    if (coop::prop_drive_host::InAHand(actor) || IsOwnHandNow(actor)) {
         // The first pose found the prop already in a hand: the generation is the hand's.
         YieldToHand(eid, e.ctx, nullptr, actor);
         UE_LOGI("[PROP-DRIVE] %s eid=%u gen=%u -- a hand holds it at the first pose; "
@@ -233,6 +253,7 @@ void ApplyPose(const coop::net::PropDriveRow& e, uint64_t nowMs, const char* who
     }
     Drive& dr = g_drives[eid];
     if (dr.d.actor && dr.d.actor != actor) GiveBackPhysics(dr, dr.d.LiveActor());
+    else FinishPickupAttempt(dr, actor, /*keepHitBody=*/false);
     AD::ResetDriveState(dr.d);
     dr.d.actor    = actor;
     dr.d.actorIdx = R::InternalIndexOf(actor);
@@ -279,7 +300,7 @@ void ReleaseHost(const coop::net::PropDriveEndPayload& end) {
     if (it != g_drives.end()) {
         Drive& dr = it->second;
         if (void* actor = dr.d.LiveActor()) {
-            if (coop::prop_drive_host::InAHand(actor)) {
+            if (coop::prop_drive_host::InAHand(actor) || IsOwnHandNow(actor)) {
                 // The same yield as the client's: a hand owns the copy, and this player's own gets its physics back.
                 YieldToHand(end.eid, end.gen, &dr, actor);
             } else {
@@ -290,7 +311,7 @@ void ReleaseHost(const coop::net::PropDriveEndPayload& end) {
         g_drives.erase(it);
     } else if (void* actor = coop::remote_prop::ResolveLiveActorByEid(end.eid)) {
         // Nothing was admitted, so the copy was never parked: it takes the End as a receiver that never saw the gen.
-        if (PR::IsDescendantOfProp(actor) && !coop::prop_drive_host::InAHand(actor))
+        if (PR::IsDescendantOfProp(actor) && !coop::prop_drive_host::InAHand(actor) && !IsOwnHandNow(actor))
             ApplyEnd(actor, end, /*parkedHere=*/false);
     }
     UE_LOGI("[PROP-DRIVE] HOST release eid=%u gen=%u -> (%.1f,%.1f,%.1f) flags=0x%02x", end.eid,
@@ -321,17 +342,19 @@ void TickApplyAndDrive(coop::net::Session& s) {
             it = g_drives.erase(it);
             continue;
         }
-        if (coop::prop_drive_host::InAHand(actor)) {
+        if (coop::prop_drive_host::InAHand(actor) || IsOwnHandNow(actor)) {
             // A hand took it before the end edge landed: the holder's drive owns the actor from here,
             // and its release restores the physics. This drive yields for good rather than writing
             // a stale target back once the hand lets go.
-            const bool ownHand = IsOwnHand(actor);
+            const bool ownHand = IsOwnHandNow(actor);
+            FinishPickupAttempt(dr, actor, ownHand);
             YieldToHand(it->first, dr.gen, &dr, actor);
             UE_LOGI("[PROP-DRIVE] CLIENT yield eid=%u -- %s owns the actor", it->first,
                     ownHand ? "this player's hand" : "a held-prop stream");
             it = g_drives.erase(it);
             continue;
         }
+        FinishPickupAttempt(dr, actor, /*keepHitBody=*/false);
         // The physics receiver's re-latch, as the held-prop drive does it: a parked copy stays
         // kinematic when the game here switches its simulation back on. That includes a copy parked
         // frozen, which the park left as it was, and which an unstick or an unfreeze here has since
@@ -389,7 +412,7 @@ void OnEnd(const coop::net::PropDriveEndPayload& p) {
         AdvanceGen(g_endedGen, p.eid, p.gen);
         void* actor = coop::remote_prop::ResolveLiveActorByEid(p.eid);
         if (actor) {
-            if (PR::IsDescendantOfProp(actor) && !coop::prop_drive_host::InAHand(actor)) {
+            if (PR::IsDescendantOfProp(actor) && !coop::prop_drive_host::InAHand(actor) && !IsOwnHandNow(actor)) {
                 ApplyEnd(actor, p, /*parkedHere=*/false);
                 UE_LOGI("[PROP-DRIVE] CLIENT END eid=%u gen=%u -> (%.1f,%.1f,%.1f) (never parked here)",
                         p.eid, static_cast<unsigned>(p.gen), p.x, p.y, p.z);
@@ -404,14 +427,17 @@ void OnEnd(const coop::net::PropDriveEndPayload& p) {
     Drive& dr = it->second;
     if (GenAfter(dr.gen, p.gen)) return;   // an end for an older generation than the live drive
     if (void* actor = dr.d.LiveActor()) {
-        if (coop::prop_drive_host::InAHand(actor)) {
+        if (coop::prop_drive_host::InAHand(actor) || IsOwnHandNow(actor)) {
             // A hand took it before the tick yielded: the same yield, so this player's own hand gets
             // the physics back. A peer's held-prop stream parked it after ours did and its release
             // hands the physics back; the pose is left alone either way.
+            const bool ownHand = IsOwnHandNow(actor);
+            FinishPickupAttempt(dr, actor, ownHand);
             YieldToHand(p.eid, p.gen, &dr, actor);
             UE_LOGI("[PROP-DRIVE] CLIENT END eid=%u gen=%u -- a held-prop stream owns the actor; "
                     "row dropped, nothing touched", p.eid, static_cast<unsigned>(p.gen));
         } else {
+            FinishPickupAttempt(dr, actor, /*keepHitBody=*/false);
             ApplyEnd(actor, p, dr.physicsParked);
             dr.physicsParked = false;
             UE_LOGI("[PROP-DRIVE] CLIENT END eid=%u gen=%u -> (%.1f,%.1f,%.1f) flags=0x%02x",
@@ -439,27 +465,34 @@ bool IsParked(void* actor) {
     return false;
 }
 
-bool PrepareNativePickup(void* actor, void* hitComponent) {
+bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::PrepareNativePickup");
-    if (!g_localRoleIsClient || !actor || !hitComponent || PhysicsStaysOff(actor)) return false;
+    if (!g_localRoleIsClient || !actor || !component || PhysicsStaysOff(actor)) return false;
     for (auto& kv : g_drives) {
         Drive& dr = kv.second;
-        if (dr.d.LiveActor() != actor || !dr.physicsParked || !dr.d.mesh) continue;
-        void* const root = E::RootComponentOf(actor);
-        // useAction tests the component in its raycast HitResult. Only hand native physics back when
-        // that exact body is the prop's mesh or root; enabling a sibling/collider would leave the
-        // tested body kinematic and could disturb unrelated component physics.
-        if (hitComponent != dr.d.mesh && hitComponent != root) continue;
-        if (!E::IsPrimitiveComponent(hitComponent)) continue;
-        // Native useAction routes a non-simulating hit to its contextual-action branch. Give the
-        // exact hit body its physics back for this native input so pickupObject sees the same body
-        // the IsSimulatingPhysics query tests. The live drive remains registered: if native pickup
-        // fails, TickApplyAndDrive re-latches physics; if it succeeds, the next tick yields the
-        // generation to the local hand and the existing held-prop stream takes ownership.
-        coop::prop_park::Unpark(actor, dr.d.mesh, /*rootSimulates=*/true);
-        if (hitComponent != dr.d.mesh && !E::SetComponentSimulatePhysics(hitComponent, true)) return false;
-        dr.physicsParked = false;
-        return true;
+        if (dr.d.LiveActor() != actor || !dr.d.mesh) continue;
+        if (!pickupBodyQuery) {
+            // For interface actors this query is on RootComponent, while pickupObject later
+            // checks HitResult.HitComponent. Do not assume they are the same body. Unpark the
+            // driven mesh to admit the native route, and remember that the exact hit body still
+            // needs its own gate. The second query below supplies that body.
+            if (!dr.physicsParked && !dr.pickupPrepared) return false;
+            if (dr.physicsParked) {
+                coop::prop_park::Unpark(actor, dr.d.mesh, /*rootSimulates=*/true);
+                dr.physicsParked = false;
+            }
+            dr.pickupPrepared = true;
+            return true;
+        }
+        // This is pickupObject's separate check on the original ray-hit component. Only service
+        // it after the same actor passed the route query above, and only for a physical body the
+        // native PhysicsHandle can actually grab.
+        if (!dr.pickupPrepared || !E::IsPrimitiveComponent(component)) return false;
+        if (component != dr.d.mesh && !E::IsComponentSimulatingPhysics(component)) {
+            if (!E::SetComponentSimulatePhysics(component, true)) return false;
+            dr.pickupBody.Set(component);
+        }
+        return E::IsComponentSimulatingPhysics(component);
     }
     return false;
 }

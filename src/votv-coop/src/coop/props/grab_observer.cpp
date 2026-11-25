@@ -57,6 +57,7 @@ std::atomic<bool> g_installed{false};
 // ticks is about half a second, matching the NPC sync's countdown.
 std::atomic<int> g_installRetryCountdown{0};
 void* g_useActionFn = nullptr;
+void* g_pickupObjectFn = nullptr;
 
 // Primary: the physics-handle component, the light grab path. `self` is the handle, owned by
 // the player as its grab handle; to learn which prop is held, read the owning player's
@@ -175,18 +176,20 @@ void GrabObserver_InpActEvt_use(void* self, void* /*function*/, void* /*params*/
 }
 
 void GrabObserver_IsSimulatingPhysics_POST(void* component, void* /*function*/, void* /*params*/) {
-    // The cooked mainPlayer_C::useAction graph calls this native query on hitcomponent at its
-    // pickup/context branch. Only intervene at that exact call site; unrelated physics queries
-    // (including contextual-action discovery and movement) retain their native result.
-    if (!component || !g_useActionFn) return;
+    // useAction has a route-selection query; for interface props it can query the actor root.
+    // pickupObject then independently queries the actual ray-hit body. Scope the two handoffs to
+    // those exact Blueprint callers so contextual-action discovery and physics elsewhere are native.
+    if (!component || !g_useActionFn || !g_pickupObjectFn) return;
     const auto caller = ue_wrap::ufunction_hook::CurrentCallerFrame();
-    if (caller.function != g_useActionFn) return;
+    const bool routeQuery = caller.function == g_useActionFn;
+    const bool pickupBodyQuery = caller.function == g_pickupObjectFn;
+    if (!routeQuery && !pickupBodyQuery) return;
     bool* const result = static_cast<bool*>(ue_wrap::ufunction_hook::CurrentResult());
-    if (!result || *result) return;
+    if (!result) return;
     void* const actor = R::OuterOf(component);
-    if (!actor || !coop::prop_drive_stream::PrepareNativePickup(actor, component)) return;
-    // PrepareNativePickup has restored the parked body. The Blueprint continues through its
-    // original pickupObject -> PhysicsHandle/timeline path, with no synthetic grab operation.
+    if (!actor || !coop::prop_drive_stream::PrepareNativePickup(actor, component, pickupBodyQuery)) return;
+    // The route query releases the parked mesh; pickupObject's later query enables the exact
+    // ray-hit body. The Blueprint continues through its original PhysicsHandle/timeline path.
     *result = true;
 }
 
@@ -293,16 +296,19 @@ void Install() {
     // declaration list returns nothing, so bind the exact declaring class explicitly.
     const auto isSim = ue_wrap::facts::ResolveOn(kRowIsSimulatingPhysics, sceneCls);
     const auto useAction = R::FindFunction(playerCls, L"useAction");
-    if (isSim && useAction) {
+    const auto pickupObject = R::FindFunction(playerCls, L"pickupObject");
+    if (isSim && useAction && pickupObject) {
         g_useActionFn = useAction;
+        g_pickupObjectFn = pickupObject;
         if (!ue_wrap::ufunction_hook::InstallPostHook(isSim, &GrabObserver_IsSimulatingPhysics_POST)) {
             g_useActionFn = nullptr;
+            g_pickupObjectFn = nullptr;
             UE_LOGW("grab_hook: IsSimulatingPhysics native post-hook failed; moving client props retain native behavior");
         } else {
-            UE_LOGI("grab_hook: IsSimulatingPhysics override scoped to mainPlayer_C.useAction installed");
+            UE_LOGI("grab_hook: IsSimulatingPhysics override scoped to mainPlayer_C.useAction and pickupObject installed");
         }
     } else {
-        UE_LOGW("grab_hook: could not resolve useAction / IsSimulatingPhysics native function");
+        UE_LOGW("grab_hook: could not resolve useAction / pickupObject / IsSimulatingPhysics native function");
     }
 
     g_installed.store(true, std::memory_order_release);
