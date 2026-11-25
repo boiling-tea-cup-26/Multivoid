@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
-Date: 2026-11-23
-Status: **b296 event-trigger-only build passed; user runtime verification pending.**
+Date: 2026-11-25
+Status: **b300 is the current user-verified partial-improvement baseline. Motion-conditioned pickup failures remain open.**
 
 ## Decision
 
@@ -171,6 +171,25 @@ The user tested b299: the issue remains. Client E on moving props still follows 
 
 A source audit found why the b299 intervention could be inert. The new facts row named `IsSimulatingPhysics` as declared on `PrimitiveComponent`, but `engine_physics.cpp` explicitly documents that UFunction as declared on `SceneComponent` and found from `PrimitiveComponent` only through superclass dispatch lookup. `facts::Resolve` for a `Declared` row calls `reflection::FindFunction`, which walks only the owning class's own `Children` list and does not walk superclasses. Therefore the b299 row can resolve empty and skip installation of the native hook. This is a source-confirmed defect in b299's registration; it explains why the runtime result could be unchanged, though no b299 log was collected to prove what its instance logged at startup.
 
-b300 corrects the facts row to `SceneComponent` and resolves it against the already-found declaring class with `ResolveOn`. The caller filter and interaction behavior are otherwise unchanged. This repairs the registration defect, but it does not prove that the hook fires at runtime or that there are no additional gates. b300 must be tested in both roles; the user result is the acceptance evidence.
+b300 corrects the facts row to `SceneComponent` and resolves it against the already-found declaring class with `ResolveOn`. The caller filter and interaction behavior are otherwise unchanged. This repairs the registration defect, but it does not prove that the hook fires on every eligible runtime query or that there are no additional gates. The user has now tested client Kerfur pickup and client R-dropped container pickup; those results are recorded below. Host control was not newly reported.
 
-The b300 Windows x64 Release package was built from source commit `8028934276b642b4e4941e39b0058677d8155fae` and placed in `~/Desktop/readytotest/recode/b300-scenecomponent-hook/`. The ABI gate and negative-control drill passed; ZIP integrity and embedded DLL identity passed. Hashes are in `RECODE_TEST_LOG.md`. User runtime verification is pending.
+The b300 Windows x64 Release package was built from source commit `8028934276b642b4e4941e39b0058677d8155fae` and placed in `~/Desktop/readytotest/recode/b300-scenecomponent-hook/`. The ABI gate and negative-control drill passed; ZIP integrity and embedded DLL identity passed. Hashes are in `RECODE_TEST_LOG.md`. The user's runtime result is recorded below.
+
+## b300 user result: partial improvement, failures track motion
+
+The user tested b300 and reports that client E pickup on Kerfur succeeds in roughly 90% of attempts. In the remaining attempts the client triggers Kerfur's context action/deactivation; the context menu generally opens and its options can be scrolled. For ordinary containers picked up and dropped through the client's R-held/inventory path, an E tap while the item is still moving can trigger its contextual action instead of pickup. After the object has settled, the normal E pickup behavior returns. The user describes the remaining issue as movement-related. These are user runtime observations, not source-derived conclusions. b300 is therefore the new partial-improvement baseline, not a complete fix.
+
+### What the b300 source establishes
+
+- The cooked `mainPlayer_C::useAction` graph queries `hitcomponent.IsSimulatingPhysics()` at offset 1572. A false result skips its first native `pickupObject(hitResult)` call and continues into the contextual/secondary-use path. There is also a later root-component physics query at offset 3259, so the exact path depends on the rest of the graph's conditions.
+- b300's native query post-hook only attempts an override when the caller is `useAction`, the original result is false, and `PrepareNativePickup` finds the hit component on a currently active client `g_drives` entry whose physics the PropDrive receiver parked. It further requires the queried body to be that actor's mesh or root primitive. The hook then restores physics and lets the original Blueprint route continue.
+- `simulateDrop` is a separate event graph from `useAction`; the cooked asset shows it begins at `ExecuteUbergraph_mainPlayer(119438)`. R hotkey handling calls `simulateDrop` on its own branches. Thus b300's E-query hook is not itself an R-drop synchronization implementation.
+- The client PropDrive receiver parks props on incoming pose application, advances their transform on its tick, and un-parks them on the matching end path. The b300 pickup override's availability consequently depends on the live receiver row and its `physicsParked` state at the time of the E query.
+
+### What remains unproven
+
+The source makes the moving-versus-settled correlation compatible with a PropDrive park/eligibility window, but does not prove it is the cause of the reported misses. In particular, we do not yet know for a failed Kerfur E press whether the query hit a nested component rather than root/mesh, whether the client had an active parked drive row, whether the hook ran, or which `useAction` branch actually executed. Nor does the separate `simulateDrop` graph establish whether the user's R-dropped instance is still under host PropDrive when the E press occurs. Do not treat “movement is the root cause” as established solely from temporal correlation.
+
+### Minimal falsification check for the next investigation
+
+Use the same client prop and repeat E taps in two phases: while visibly moving under host control, then after it settles. Include one ordinary prop and one moving Kerfur; note for each attempt whether E picked up, ran a context action, or failed, and whether the context prompt was already visible before the tap. The decisive source/runtime comparison is whether a failed moving tap coincides with the client not taking the b300 `PrepareNativePickup` path (no eligible active parked drive or non-root/mesh hit) while a successful moving tap does. Test host R-drop and client R-drop separately because their ownership/drive histories may differ. No parameter or protocol change is justified until that boundary is identified.
