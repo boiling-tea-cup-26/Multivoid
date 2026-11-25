@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
 Date: 2026-11-25
-Status: **b300 is the current user-verified partial-improvement baseline. Motion-conditioned pickup failures remain open.**
+Status: **b301 produced no user-observed improvement; b300 remains the last partial-improvement baseline. Further investigation is focused on the distinct components tested by the native interaction and pickup paths.**
 
 ## Decision
 
@@ -193,3 +193,38 @@ The source makes the moving-versus-settled correlation compatible with a PropDri
 ### Minimal falsification check for the next investigation
 
 Use the same client prop and repeat E taps in two phases: while visibly moving under host control, then after it settles. Include one ordinary prop and one moving Kerfur; note for each attempt whether E picked up, ran a context action, or failed, and whether the context prompt was already visible before the tap. The decisive source/runtime comparison is whether a failed moving tap coincides with the client not taking the b300 `PrepareNativePickup` path (no eligible active parked drive or non-root/mesh hit) while a successful moving tap does. Test host R-drop and client R-drop separately because their ownership/drive histories may differ. No parameter or protocol change is justified until that boundary is identified.
+
+## b301 hit-component eligibility test
+
+The user asked for a patch testing the residual-motion theory. b300's native `useAction` query tests the exact raycast hit component, but `PrepareNativePickup` previously accepted that component only when it was the active host-driven prop's main mesh or root. If the ray hit a different primitive component on the same prop, b300 left it kinematic and let the native graph take its contextual-use branch. This gate is an explicit source fact; whether the user's intermittent Kerfur or bin failures hit that gate was not observed at runtime.
+
+b301 keeps the active PropDrive actor and parked-physics requirements. It broadens eligibility only to a primitive ray-hit component on that same actor. If the native pickup does not transfer the actor into the local hand by the next drive tick, b301 turns that temporary component simulation back off before continuing the host-driven pose path. Frozen/static props, non-driven props, other callers, contextual actions reached before the native physics query, R input routing, wire payloads, and interpolation settings are unchanged. This is a causal test for a miss caused by a non-mesh/root primitive hit, not a general fix for moving items; if the actor is not under active PropDrive, b301 does not take the new path.
+
+The b301 Windows x64 Release DLL was built from source commit `69b1233b6d2010b405b9e3d331de8208904049a3`. Full CMake build, the ABI gate, and its must-fire negative control passed. Because PowerShell is unavailable in this Linux environment, packaging reused the verified b300 archive tree and replaced its version metadata, changelog, README, and DLL; an independent ZIP CRC check and embedded-DLL hash comparison passed. Package and SHA-256 values are in `RECODE_TEST_LOG.md`; it is at `~/Desktop/readytotest/recode/b301-moving-hitbody/`. The user has since tested b301 and reported no improvement; this package is a failed candidate, not a new baseline.
+
+## b301 user result and follow-up investigation
+
+The user tested b301 and reports **no improvement to the previously described issues**. This rejects b301 as a useful candidate and gives no support to the specific claim that the missed pickup was caused by a ray hit landing on a non-mesh primitive component. It does not establish which branch ran during a failed attempt, and the user did not itemize fresh results for each separate control (settled pickup, hold-E, host control, or R-held luggage). No logs or runtime component identities were collected. Keep b300 as the last partial-improvement baseline; do not treat b301 as a fix.
+
+### Additional source trace: two distinct physics gates
+
+The upstream cooked `mainPlayer_C::useAction` graph has two routes relevant to pickup:
+
+- At bytecode offset 1085 it tests whether the hit actor implements `int_player`. The ray-hit `hitcomponent.IsSimulatingPhysics()` check at offset 1572 is only reached when that interface test is false (`1123` branches to `1572`).
+- For interface actors, the graph first evaluates prop/context handling and then, in its later fallback route, checks `hitactor.RootComponent.IsSimulatingPhysics()` at offset 3259. A true result routes to `pickupObject(hitResult)` at `2620`; false continues to the `player_use` contextual route at `3472`.
+- The native Blueprint `pickupObject(hitResult)` has a further independent check: it extracts the original `HitComponent` and calls `IsSimulatingPhysics()` at offset 103372 before it assigns the grab actor and reaches the hand setup. This is after the root-component decision in `useAction`.
+- b301's hook receives only the component whose `IsSimulatingPhysics` native is currently running. On the interface fallback route, that is the actor root component, not necessarily the original ray-hit component stored in `hitResult`. `PrepareNativePickup` therefore cannot infer or restore the hit component from that call. Its b301 expansion to any primitive applies only to the component it was given; it does not establish that the second `pickupObject` gate will see physics enabled on the original hit component.
+
+These are source facts. They identify a real coverage hole in the b301 approach: it models the physics query as one gate, while the native flow has a root-component route decision followed by a second hit-component gate inside pickup. They do **not** yet prove that a particular failed client attempt had different root and hit components, or that this is the only remaining cause. The same source shows other early interface/context branches can be taken before either physics check, so a failed attempt could also bypass the hook entirely.
+
+### Current leading explanation and what would falsify it
+
+The leading source-grounded explanation is that b300/b301 modify the physics result for a component at the route-selection stage but do not guarantee the exact hit body passes the later native pickup gate. This is especially plausible for interface props with a root component different from the ray-hit body. b301's lack of improvement is consistent with that gap, but is not runtime confirmation. The earlier idea that the remaining misses were simply a non-mesh primitive hit is weakened: changing that eligibility alone had no reported effect.
+
+The decisive minimal runtime comparison, if a later test is authorized, is one moving interface prop that fails and the same prop after it settles: identify whether its root component and ray-hit component are the same, and whether the native pickup gate sees the hit body simulating when the fallback root query passes. A simple prop whose root is its mesh is a useful control. This can be answered with one narrowly scoped trace at the two existing query sites; do not add broad per-tick logging. If root and hit are the same and both queries return true during a failed pickup, this explanation is falsified and investigation should move to `pickupObject`'s later conditions/hand initialization. If the root query is false, the route never reaches native pickup; investigate why that actor lacks an eligible active client PropDrive entry or whether an earlier contextual branch consumed the input. If the root query is true but the hit-component query is false, the component-handoff gap is confirmed.
+
+### R-held drop remains a separate ownership question
+
+The cooked graph routes R through `hotkeyAction`/`simulateDrop`, separately from the E `useAction` graph. Source also distinguishes a client's outbound `prop_syncer_client` row from the client's inbound `prop_drive_stream::g_drives` receiver rows. b301's pickup preparation searches only the inbound PropDrive receiver table. The source reviewed so far does not establish which ownership state is active on the client at the instant after its own R-drop, nor whether its root and hit component remain simulating. Do not combine the R-drop symptom with host-thrown PropDrive cases until that ownership/physics state is established.
+
+No gameplay source, network protocol, or interpolation value was changed in this follow-up. No new build is warranted from these findings alone.
