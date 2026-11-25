@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
 Date: 2026-11-25
-Status: **b301 produced no user-observed improvement; b300 remains the last partial-improvement baseline. Further investigation is focused on the distinct components tested by the native interaction and pickup paths.**
+Status: **b301 produced no user-observed improvement; b302 is built from the clean b300 source point with a two-gate native pickup handoff and live-hand ownership check. Runtime verification is pending.**
 
 ## Decision
 
@@ -228,3 +228,21 @@ The decisive minimal runtime comparison, if a later test is authorized, is one m
 The cooked graph routes R through `hotkeyAction`/`simulateDrop`, separately from the E `useAction` graph. Source also distinguishes a client's outbound `prop_syncer_client` row from the client's inbound `prop_drive_stream::g_drives` receiver rows. b301's pickup preparation searches only the inbound PropDrive receiver table. The source reviewed so far does not establish which ownership state is active on the client at the instant after its own R-drop, nor whether its root and hit component remain simulating. Do not combine the R-drop symptom with host-thrown PropDrive cases until that ownership/physics state is established.
 
 No gameplay source, network protocol, or interpolation value was changed in this follow-up. No new build is warranted from these findings alone.
+
+## b302 dual-gate native pickup candidate
+
+b302 starts from the b300 source commit `8028934276b642b4e4941e39b0058677d8155fae`, not b301. b301's primitive-hit eligibility change is excluded. The source branch retains the b301 failure report as documentation evidence, then adds only the b302 implementation and build identifier.
+
+The native call path now has a paired, actor-scoped handoff:
+
+1. When the client's actively host-driven prop is parked, the `useAction` physics query releases the prop's main mesh and records a pending native pickup for that actor. This route query may be on the actor's root component for `int_player` props.
+2. At the separate `pickupObject` physics query, the hook receives the original `HitComponent`. It enables that primitive hit body if necessary and lets the native Blueprint continue only when the exact body reports simulating physics. The game's `pickupObject`, PhysicsHandle, grab timeline, and held-prop stream still perform the pickup; no synthetic grab or new wire payload is introduced.
+3. If the hand did not take the prop by the next PropDrive tick, the temporary hit body is restored and the driven mesh is re-parked. If the game's live `grabbing_actor` already names the prop, the drive yields and leaves the native hand's body enabled.
+
+The live-hand read addresses a second source-confirmed timing gap: `net_pump.cpp` calls `subsystems::TickGameplay` before `local_streams::Tick`, while `prop_drive_host::Pump` advances `prop_drive_stream::TickApplyAndDrive` from that earlier chain. `prop_drive_host::InAHand` uses `local_streams::LastHeldActor()`, which is refreshed later in the same pump. The b302 receiver therefore checks `engine::IsMainPlayerGrabbing` directly before re-parking, in addition to the existing cached hand and remote-held-drive checks. This closes the one-pump stale-cache window for the local native hand.
+
+This scope is the client copy currently parked by an inbound host PropDrive. It does not alter interpolation or add a generic R-input override. Client R-drop/luggage is tracked as a separate test because it may be locally authored and need not enter this receiver table. Do not infer that it is fixed by the E pickup test.
+
+The b302 Windows x64 Release build used the retained Linux clang-cl staging tree and cached dependencies. The full CMake build passed; the ABI gate passed and its synthesized violating-DLL control fired; the resource version string is `0.9.0n b302`. Packaging reused the verified b301 archive tree because PowerShell is unavailable, replacing the DLL and the b302 README/changelog/manifest. ZIP CRC, manifest version `0.9.302`, and embedded/loose DLL identity passed. Source commit: `689c7ce22c8b070eee855ddea4027c7e99eb574e`. Package: `~/Desktop/readytotest/recode/b302-native-pickup-gates/Pelmentor-Multivoid-0.9.302.zip`; ZIP SHA-256 `35c53462a389acd5be1d31d4177c09da590a3504601be4c24e9d425d3ba3f92b`; DLL SHA-256 `3fe30d25d57070c1a49f548c6016a822e6522906e1d570d3a571983c3f3717f9`.
+
+Gameplay remains unverified. Test host-thrown moving and settled props, moving/falling regular Kerfur, and intentional hold-E context actions. Keep client R-drop, luggage, and host controls as separate observations. The package README has the short test checklist. b300 remains the last user-reported partial-improvement baseline until b302 is tested.
