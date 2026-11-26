@@ -1,13 +1,13 @@
 # Prop pickup regression recode decision
 
-Date: 2026-11-25
-Status: **b302 failed in-game: moving Kerfur pickup remains intermittent, the client reports a snappier/laggier feel, and client R-drop then E-pickup still fails. b303 adds a separate native-pickup handoff for K-5 adopted Kerfur mirrors; runtime verification is pending.**
+Date: 2026-11-26
+Status: **b306 is built and packaged for two-instance in-game testing. It tests the client E pickup handoff for a parked, host-driven PropDrive mirror while preserving the native pickup and hold-E context paths. Runtime result is pending; this is not a confirmed fix.**
 
 ## Decision
 
 Stop patching the b329 line. Reconstruct the regression by starting from a known-working public release and reintroducing the modifications in logical groups, testing client pickup after each group. There will be no b330 based on b329.
 
-The new isolated checkout is this directory, on branch `recode/b301-prop-pickup-bisect`, created from the public tag `v0.9.0n-b292-dev` at commit `ca8537cb902bc4ed4fc5f276cb4a4b693b69909b`. The parent project remains untouched by recode implementation work.
+The new isolated checkout is this directory, started from the public tag `v0.9.0n-b292-dev` at commit `ca8537cb902bc4ed4fc5f276cb4a4b693b69909b`. It is now on branch `recode/b306-prop-pickup`. The parent project remains untouched by recode implementation work.
 
 ## Evidence at the start
 
@@ -334,4 +334,6 @@ Following the b305 source/log audit, this candidate changes only the client nati
 
 `grab_observer` now reads the `sec` parameter from `mainPlayer_C::useAction` and only applies the route override to `useAction(False)`, the initial E route. The Blueprint's recursive `useAction(True)` remains untouched so hold-E contextual selection retains its native path. The pickupObject hit-body query is serviced only after the initial route prepared the same drive. Static props and actors with no matching live PropDrive row retain native behavior.
 
-This targets the remaining source-level gate that could reject a parked, currently driven mirror before the helper found its drive row, while preserving the native pickup mechanics and hold-E path. The b305 logs establish that a drive row existed for EID 1402 at the time action 8 was forwarded, but do not show whether `isFrozen` was true at that exact query or whether the native callback reached the helper. So b306 is a test candidate, not a claim that the query-stage cause is conclusively proven or that the bug is fixed. The R-held/drop path does not use this PropDrive gate and is not changed. Build and runtime result are recorded separately in `RECODE_TEST_LOG.md`.
+This targets the remaining source-level gate that could reject a parked, currently driven mirror before the helper found its drive row, while preserving the native pickup mechanics and hold-E path. The b305 logs establish that a drive row existed for EID 1402 at the time action 8 was forwarded, but do not show whether `isFrozen` was true at that exact query or whether the native callback reached the helper. So b306 is a test candidate, not a claim that the query-stage cause is conclusively proven or that the bug is fixed. The R-held/drop path does not use this PropDrive gate and is not changed.
+
+b306 source commit: `323a7f9` (`fix(props): hand parked driven props to native E pickup`). A Windows x64 Release DLL was built locally with the retained Linux clang-cl cross-build SDK and dependency staging. The staging copy was based on b297 and received the four code files changed between b297 and b306; the staging-only CMake adaptation omitted MSVC-only warning/parallel switches, while gameplay C++ matched the committed b306 tree. Full CMake build and ABI gate passed; the ABI negative-control drill detected its synthesized violation. `reliablekind_gate` and the fact-row gate drill passed. The regular fact-row gate still reports three missing Unreal reference rows for `SceneComponent.IsSimulatingPhysics`, `SceneComponent.SetVisibility`, and `ActorComponent.K2_DestroyComponent`; all three references were present in b305 and therefore predate b306. The package was assembled locally from the verified b305 layout with b306 DLL and metadata because `pwsh` is unavailable; ZIP structure, required entries, manifest build identity, DLL hash, PE signature, and ZIP CRC passed. Package: `~/Desktop/readytotest/recode/b306-parked-prop-pickup/Pelmentor-Multivoid-0.9.306.zip`; ZIP SHA-256 `639d7b0f963926c95fd64b56de1c100de2df2b9e085d007fff5c0de38c0f5167`; DLL SHA-256 `b24dfe2095dffe3ac99adc1d32d43215cf6ddbc88c9d94e0766d24b007946016`. Runtime verification is pending.
