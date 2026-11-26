@@ -118,7 +118,7 @@ void RestoreKerfurPickupAttempt(bool keepPhysics) {
 // prop handoff cannot make it pass the game's native physics checks.
 bool PrepareKerfurNativePickup(void* actor, void* component, bool pickupBodyQuery) {
     if (coop::kerfur_entity::GetKerfurMirrorEidForActor(actor) == coop::element::kInvalidId ||
-        !PR::IsDescendantOfProp(actor) || PhysicsStaysOff(actor)) return false;
+        !PR::IsDescendantOfProp(actor) || PR::IsStatic(actor)) return false;
     void* const mesh = PR::GetStaticMesh(actor);
     if (!mesh) return false;
     if (!pickupBodyQuery) {
