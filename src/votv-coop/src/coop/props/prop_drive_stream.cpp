@@ -523,10 +523,9 @@ bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
     if (!g_localRoleIsClient || !actor || !component || PR::IsStatic(actor)) return false;
     // Kerfur mirrors have their own K-5 pose lane and are intentionally absent from g_drives.
     // Let their scoped native pickup handoff decide whether a frozen dynamic mirror can be
-    // temporarily simulated; the ordinary PropDrive path below still refuses frozen props.
+    // temporarily simulated; ordinary PropDrive mirrors are handled by their live drive row below.
     if (coop::kerfur_entity::GetKerfurMirrorEidForActor(actor) != coop::element::kInvalidId)
         return PrepareKerfurNativePickup(actor, component, pickupBodyQuery);
-    if (PhysicsStaysOff(actor)) return false;
     for (auto& kv : g_drives) {
         Drive& dr = kv.second;
         if (dr.d.LiveActor() != actor || !dr.d.mesh) continue;
@@ -535,6 +534,11 @@ bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
             // checks HitResult.HitComponent. Do not assume they are the same body. Unpark the
             // driven mesh to admit the native route, and remember that the exact hit body still
             // needs its own gate. The second query below supplies that body.
+            // A live host drive owns this mirror's pose. Its local frozen flag does not decide
+            // whether the client's native E route may take it: parking changes simulation state
+            // on this copy, and host ownership remains in force until the hand handoff arrives.
+            // Require an actual parked/prepared drive so ordinary frozen props keep their native
+            // contextual-use behavior.
             if (!dr.physicsParked && !dr.pickupPrepared) return false;
             if (dr.physicsParked) {
                 coop::prop_park::Unpark(actor, dr.d.mesh, /*rootSimulates=*/true);

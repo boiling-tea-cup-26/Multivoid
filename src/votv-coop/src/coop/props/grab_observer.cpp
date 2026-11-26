@@ -58,6 +58,7 @@ std::atomic<bool> g_installed{false};
 std::atomic<int> g_installRetryCountdown{0};
 void* g_useActionFn = nullptr;
 void* g_pickupObjectFn = nullptr;
+int32_t g_useActionSecondaryOff = -1;
 
 // Primary: the physics-handle component, the light grab path. `self` is the handle, owned by
 // the player as its grab handle; to learn which prop is held, read the owning player's
@@ -184,6 +185,12 @@ void GrabObserver_IsSimulatingPhysics_POST(void* component, void* /*function*/, 
     const bool routeQuery = caller.function == g_useActionFn;
     const bool pickupBodyQuery = caller.function == g_pickupObjectFn;
     if (!routeQuery && !pickupBodyQuery) return;
+    // useAction(False) is the initial E route. The Blueprint's recursive useAction(True)
+    // handles held-E contextual selection; keep that route native even for a streamed prop.
+    if (routeQuery) {
+        if (!caller.locals || g_useActionSecondaryOff < 0) return;
+        if (*reinterpret_cast<const bool*>(caller.locals + g_useActionSecondaryOff)) return;
+    }
     bool* const result = static_cast<bool*>(ue_wrap::ufunction_hook::CurrentResult());
     if (!result) return;
     void* const actor = R::OuterOf(component);
@@ -298,9 +305,14 @@ void Install() {
     const auto useAction = R::FindFunction(playerCls, L"useAction");
     const auto pickupObject = R::FindFunction(playerCls, L"pickupObject");
     if (isSim && useAction && pickupObject) {
+        g_useActionSecondaryOff = R::FindParamOffset(useAction, L"sec");
         g_useActionFn = useAction;
         g_pickupObjectFn = pickupObject;
-        if (!ue_wrap::ufunction_hook::InstallPostHook(isSim, &GrabObserver_IsSimulatingPhysics_POST)) {
+        if (g_useActionSecondaryOff < 0) {
+            g_useActionFn = nullptr;
+            g_pickupObjectFn = nullptr;
+            UE_LOGW("grab_hook: useAction sec parameter not found; native physics-query handoff not installed");
+        } else if (!ue_wrap::ufunction_hook::InstallPostHook(isSim, &GrabObserver_IsSimulatingPhysics_POST)) {
             g_useActionFn = nullptr;
             g_pickupObjectFn = nullptr;
             UE_LOGW("grab_hook: IsSimulatingPhysics native post-hook failed; moving client props retain native behavior");
