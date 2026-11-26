@@ -520,7 +520,13 @@ bool IsParked(void* actor) {
 
 bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::PrepareNativePickup");
-    if (!g_localRoleIsClient || !actor || !component || PhysicsStaysOff(actor)) return false;
+    if (!g_localRoleIsClient || !actor || !component || PR::IsStatic(actor)) return false;
+    // Kerfur mirrors have their own K-5 pose lane and are intentionally absent from g_drives.
+    // Let their scoped native pickup handoff decide whether a frozen dynamic mirror can be
+    // temporarily simulated; the ordinary PropDrive path below still refuses frozen props.
+    if (coop::kerfur_entity::GetKerfurMirrorEidForActor(actor) != coop::element::kInvalidId)
+        return PrepareKerfurNativePickup(actor, component, pickupBodyQuery);
+    if (PhysicsStaysOff(actor)) return false;
     for (auto& kv : g_drives) {
         Drive& dr = kv.second;
         if (dr.d.LiveActor() != actor || !dr.d.mesh) continue;
@@ -547,7 +553,7 @@ bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
         }
         return E::IsComponentSimulatingPhysics(component);
     }
-    return PrepareKerfurNativePickup(actor, component, pickupBodyQuery);
+    return false;
 }
 
 bool IsCorrectionStale(uint32_t eid, uint8_t gen, bool open) {
