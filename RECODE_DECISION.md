@@ -1,7 +1,7 @@
 # Prop pickup regression recode decision
 
 Date: 2026-11-25
-Status: **b301 produced no user-observed improvement; b302 is built from the clean b300 source point with a two-gate native pickup handoff and live-hand ownership check. Runtime verification is pending.**
+Status: **b302 failed in-game: moving Kerfur pickup remains intermittent, the client reports a snappier/laggier feel, and client R-drop then E-pickup still fails. b303 adds a separate native-pickup handoff for K-5 adopted Kerfur mirrors; runtime verification is pending.**
 
 ## Decision
 
@@ -245,4 +245,20 @@ This scope is the client copy currently parked by an inbound host PropDrive. It 
 
 The b302 Windows x64 Release build used the retained Linux clang-cl staging tree and cached dependencies. The full CMake build passed; the ABI gate passed and its synthesized violating-DLL control fired; the resource version string is `0.9.0n b302`. Packaging reused the verified b301 archive tree because PowerShell is unavailable, replacing the DLL and the b302 README/changelog/manifest. ZIP CRC, manifest version `0.9.302`, and embedded/loose DLL identity passed. Source commit: `689c7ce22c8b070eee855ddea4027c7e99eb574e`. Package: `~/Desktop/readytotest/recode/b302-native-pickup-gates/Pelmentor-Multivoid-0.9.302.zip`; ZIP SHA-256 `35c53462a389acd5be1d31d4177c09da590a3504601be4c24e9d425d3ba3f92b`; DLL SHA-256 `3fe30d25d57070c1a49f548c6016a822e6522906e1d570d3a571983c3f3717f9`.
 
-Gameplay remains unverified. Test host-thrown moving and settled props, moving/falling regular Kerfur, and intentional hold-E context actions. Keep client R-drop, luggage, and host controls as separate observations. The package README has the short test checklist. b300 remains the last user-reported partial-improvement baseline until b302 is tested.
+The package README has the b302 test checklist. The user has since reported b302 failed; the b302 test result and the next source investigation are recorded below.
+
+## b302 user result and b303 K-5 scope
+
+The user reports that b302 is not fixed. A client can sometimes pick up moving Kerfur, but it still fails most attempts; Kerfur feels snappier and laggier to the client. The client R-hold/drop/E sequence still fails consistently. These are runtime observations. The R-drop lane was explicitly outside b302's change, so its continued failure does not test that patch. The changed feel is correlated with b302, but the observation does not identify which operation caused it.
+
+### Source distinction found after b302
+
+The b302 helper only searches the incoming `prop_drive_stream::g_drives` table. Regular Kerfur mirrors are created through a distinct path: `kerfur_prop_adoption::BindAsMirror` calls `SetActorSimulatePhysics(actor, false)` and registers the actor with `kerfur_entity::NotifyKerfurPropMirrorBound` for the K-5 held-pose stream. That path does not create an entry in `prop_drive_stream::g_drives`. Therefore b302's two-gate prep does not normally cover an adopted regular Kerfur mirror. This is a source-confirmed coverage gap; it does not, by itself, prove the runtime Kerfur instance was adopted through this path or explain every intermittent miss.
+
+The client copy's K-5 mapping is also used by `local_streams::ResolveHeldPropEid`, so if the native pickup succeeds, the existing held-prop stream has an identity for that Kerfur and can continue the normal host-side arbitration. No new network message or synthetic grab was added.
+
+### b303 change and limits
+
+b303 extends the existing scoped `IsSimulatingPhysics` handoff only to an actor that `GetKerfurMirrorEidForActor` confirms is a live K-5 host mirror. It temporarily enables the adopted mirror's mesh for the route/hit-body checks; if the local hand has not taken it by the next PropDrive pump, the attempt restores the mesh and any separately enabled hit body to non-simulating. On a successful native handoff it leaves simulation on, allowing the existing local held-pose/K-5 path to carry the prop. Static/frozen actors, non-Kerfur props, host-side input, and unrelated contextual interactions are outside this extra branch. This does not alter interpolation settings.
+
+This is a narrow fix for the confirmed K-5 eligibility gap, not a complete fix claim. Client R-held/drop then E remains unresolved: the held-pose receiver on the host and the client's post-release ownership/physics state are distinct from both K-5 mirror adoption and an incoming host PropDrive row. The available observations do not identify which owner or physics gate is active at the failed E press, so b303 does not change that path. Test b303's moving/deactivated regular Kerfur pickup and hold-E context actions; report client R-drop separately. The user has not yet tested b303.

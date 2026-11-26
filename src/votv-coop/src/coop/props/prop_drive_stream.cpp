@@ -14,6 +14,7 @@
 #include "coop/props/prop_park.h"             // Park / Unpark: the parked prop, and a Character welded on it
 #include "coop/props/prop_syncer.h"           // SkipsHostPose: the prop this peer authors
 #include "coop/props/prop_wire_parity.h"      // the join converge's own physics restore
+#include "coop/creatures/kerfur_entity.h"      // K-5 adopted Kerfur mirrors are parked outside PropDrive
 #include "coop/player/local_streams.h"
 #include "coop/player/hand_item.h"
 #include "coop/player/players_registry.h"
@@ -56,6 +57,13 @@ struct Drive {
 constexpr uint32_t kRelatchLoud = 60;
 std::unordered_map<uint32_t, Drive>   g_drives;    // eid -> drive
 bool g_localRoleIsClient = false;                   // updated on the game-thread drive tick
+struct KerfurPickupAttempt {
+    ue_wrap::CachedObjRef actor;
+    ue_wrap::CachedObjRef mesh;
+    ue_wrap::CachedObjRef hitBody;
+    bool meshWasSimulating = false;
+};
+KerfurPickupAttempt g_kerfurPickup;
 std::unordered_map<uint32_t, uint8_t> g_endedGen;  // eid -> the generation its end edge closed
 // eid -> the generation whose END pose ApplyEnd wrote, and onto which actor: captured with its slot
 // serial, so a successor re-created in the same slot does not read as the actor the pose was written on.
@@ -90,6 +98,46 @@ void FinishPickupAttempt(Drive& dr, void* actor, bool keepHitBody) {
     dr.pickupPrepared = false;
     if (body && !keepHitBody && actor && R::OuterOf(body) == actor)
         E::SetComponentSimulatePhysics(body, false);
+}
+
+void RestoreKerfurPickupAttempt(bool keepPhysics) {
+    void* const actor = g_kerfurPickup.actor.Get();
+    void* const mesh = g_kerfurPickup.mesh.Get();
+    void* const hitBody = g_kerfurPickup.hitBody.Get();
+    const bool meshWasSimulating = g_kerfurPickup.meshWasSimulating;
+    g_kerfurPickup = KerfurPickupAttempt{};
+    if (!actor || keepPhysics) return;
+    if (hitBody && hitBody != mesh && R::OuterOf(hitBody) == actor)
+        E::SetComponentSimulatePhysics(hitBody, false);
+    if (mesh && R::OuterOf(mesh) == actor && !meshWasSimulating)
+        E::SetComponentSimulatePhysics(mesh, false);
+}
+
+// Kerfur's client mirror is frozen by kerfur_prop_adoption, then carried by the K-5 eid
+// stream. It is deliberately absent from PropDrive's receiver table, so the ordinary parked
+// prop handoff cannot make it pass the game's native physics checks.
+bool PrepareKerfurNativePickup(void* actor, void* component, bool pickupBodyQuery) {
+    if (coop::kerfur_entity::GetKerfurMirrorEidForActor(actor) == coop::element::kInvalidId ||
+        !PR::IsDescendantOfProp(actor) || PhysicsStaysOff(actor)) return false;
+    void* const mesh = PR::GetStaticMesh(actor);
+    if (!mesh) return false;
+    if (!pickupBodyQuery) {
+        if (g_kerfurPickup.actor.Is(actor)) return true;
+        RestoreKerfurPickupAttempt(/*keepPhysics=*/false);
+        const bool wasSimulating = E::IsComponentSimulatingPhysics(mesh);
+        if (!wasSimulating && !E::SetComponentSimulatePhysics(mesh, true)) return false;
+        g_kerfurPickup = KerfurPickupAttempt{};
+        g_kerfurPickup.actor.Set(actor);
+        g_kerfurPickup.mesh.Set(mesh);
+        g_kerfurPickup.meshWasSimulating = wasSimulating;
+        return true;
+    }
+    if (!g_kerfurPickup.actor.Is(actor) || !E::IsPrimitiveComponent(component)) return false;
+    if (component != mesh && !E::IsComponentSimulatingPhysics(component)) {
+        if (!E::SetComponentSimulatePhysics(component, true)) return false;
+        g_kerfurPickup.hitBody.Set(component);
+    }
+    return E::IsComponentSimulatingPhysics(component);
 }
 
 // By eid first -- the registry's O(1) row, which a joiner's keyed copy carries from the bind --
@@ -321,6 +369,11 @@ void ReleaseHost(const coop::net::PropDriveEndPayload& end) {
 void TickApplyAndDrive(coop::net::Session& s) {
     UE_ASSERT_GAME_THREAD("prop_drive_stream::TickApplyAndDrive");
     g_localRoleIsClient = s.role() == coop::net::Role::Client;
+    if (void* actor = g_kerfurPickup.actor.Get()) {
+        void* const local = coop::players::Registry::Get().Local();
+        const bool taken = local && E::IsMainPlayerGrabbing(local, actor);
+        RestoreKerfurPickupAttempt(taken);
+    }
     const uint64_t nowMs = AD::NowMs();
     g_batch.clear();
     // The host's own batch slot is never written (a client's rows go to the origin stores), so only a client drains it.
@@ -494,7 +547,7 @@ bool PrepareNativePickup(void* actor, void* component, bool pickupBodyQuery) {
         }
         return E::IsComponentSimulatingPhysics(component);
     }
-    return false;
+    return PrepareKerfurNativePickup(actor, component, pickupBodyQuery);
 }
 
 bool IsCorrectionStale(uint32_t eid, uint8_t gen, bool open) {
@@ -512,6 +565,7 @@ bool IsCorrectionStale(uint32_t eid, uint8_t gen, bool open) {
 }
 
 void OnDisconnect() {
+    RestoreKerfurPickupAttempt(/*keepPhysics=*/false);
     g_localRoleIsClient = false;
     for (auto& kv : g_drives) GiveBackPhysics(kv.second, kv.second.d.LiveActor());
     coop::prop_child_release::OnDisconnect();   // the waiting doors are given back with their parents
